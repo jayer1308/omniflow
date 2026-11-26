@@ -1,6 +1,6 @@
 # GOAL-005 v1: OmniFlow don hang da kenh + vong doi: tao don tai quay + API (kenh counter/web/api) voi snapshot gia tai thoi diem dat; state machine draft -> confirmed -> processing -> completed / cancelled (chuyen sai -> 400); xac nhan giu hang nguyen tu, huy giai phong dung so da giu, hoan tat release + out trong 1 transaction; idempotency + chong ban qua ton trong transaction; tim kiem/loc/phang trang + lich su don; RBAC don theo vai + pham vi chi nhanh/kho + audit log; check/demo mo rong buoc don van xanh
 
-Status: approved
+Status: testing
 
 ```json
 {
