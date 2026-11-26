@@ -6,6 +6,7 @@ GOAL-003  setup v2
   Test đã khoá       L2 45
   Kiểm kê / phạm vi  bật
   Lớp khâu submit    WP-MAIN: L0 tsc ✓ · L1 vitest ✓ · L2 vitest-acceptance ✓
+  Lớp khâu đóng      L0 tsc ✓ · L1 vitest ✓ · L2 vitest-acceptance ✓ · L3 vitest-integration ✓
   Ngoại lệ           needs-human WP-MAIN (agent:lead): Them dependency csv-parse/csv-stringify (parse CSV: BOM, dau phay trong ten, dong trong — theo rui ro brief R-8/R-9) + multer (multipart file upload cho import/preview) + @types/multer (dev); chi thay package.json/package-lock.json, khong doi logic ngoai pham vi goal
   Agent duyệt thay   1 chỗ: needs-human WP-MAIN (agent:lead)
   Chỉ có mã thoát    app.L0.tsc
