@@ -25,7 +25,7 @@
   ],
   "dependencies": [],
   "interfaces": [
-    "GOAL-005A@v1"
+    "GOAL-005A@v2"
   ],
   "acceptance": [
     {
@@ -59,7 +59,10 @@
   "stubPaths": [
     "src/orders.ts",
     "src/stock.ts",
-    "src/app.ts"
+    "src/app.ts",
+    "src/auth.ts",
+    "src/db.ts",
+    "src/seed.ts"
   ]
 }
 ```
