@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import multer from 'multer';
+import { stringify } from 'csv-stringify/sync';
 import {
   createSession,
   destroySession,
@@ -11,6 +13,7 @@ import {
 } from './auth.js';
 import type { SessionUser } from './auth.js';
 import { withIdempotency } from './idempotency.js';
+import { effectivePrice, isAllowedChannel, parseProductCsvWithLines } from './products.js';
 import { can, ROLES, type Role } from './rbac.js';
 import { assertSameOrg, tenantScope, type TenantRequest } from './tenant.js';
 
@@ -645,6 +648,1395 @@ export function createApp(db: DatabaseSync): Express {
     }
     res.render('audit-log', { user: actor, logs: visibleAuditRows(db, actor) });
   });
+
+  // ---------- Sản phẩm / giá / CSV (GOAL-003) ----------
+
+  const uploadCsv = multer({ storage: multer.memoryStorage() });
+
+  interface ProductRow {
+    id: number;
+    org_id: number;
+    code: string;
+    name: string;
+    unit: string;
+    price: number;
+    min_stock: number;
+    status: 'active' | 'discontinued';
+    category_id: number | null;
+    created_at: string;
+    updated_at: string;
+  }
+
+  interface VariantRow {
+    id: number;
+    org_id: number;
+    product_id: number;
+    sku: string;
+    name: string;
+    barcode: string | null;
+    price_override: number | null;
+    created_at: string;
+    updated_at: string;
+  }
+
+  interface CategoryRow {
+    id: number;
+    org_id: number;
+    name: string;
+    parent_id: number | null;
+    created_at: string;
+    updated_at: string;
+  }
+
+  interface PriceRow {
+    id: number;
+    org_id: number;
+    product_id: number;
+    variant_id: number | null;
+    channel: string | null;
+    branch_id: number | null;
+    price: number;
+    created_at: string;
+    updated_at: string;
+  }
+
+  function getProductById(db: DatabaseSync, id: number): ProductRow | undefined {
+    return db.prepare('SELECT * FROM products WHERE id = ?').get(id) as ProductRow | undefined;
+  }
+
+  function getVariantById(db: DatabaseSync, id: number): VariantRow | undefined {
+    return db.prepare('SELECT * FROM product_variants WHERE id = ?').get(id) as
+      | VariantRow
+      | undefined;
+  }
+
+  function getCategoryById(db: DatabaseSync, id: number): CategoryRow | undefined {
+    return db.prepare('SELECT * FROM categories WHERE id = ?').get(id) as CategoryRow | undefined;
+  }
+
+  function isIntMoney(value: unknown): value is number {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  }
+
+  function isNonEmptyString(value: unknown): value is string {
+    return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  function productDetail(db: DatabaseSync, product: ProductRow): Record<string, unknown> {
+    const variants = db
+      .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY id')
+      .all(product.id) as unknown as VariantRow[];
+    const attributes = db
+      .prepare('SELECT * FROM product_attributes WHERE product_id = ? ORDER BY id')
+      .all(product.id) as unknown as Record<string, unknown>[];
+    const images = db
+      .prepare('SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order, id')
+      .all(product.id) as unknown as Record<string, unknown>[];
+    const category =
+      product.category_id === null ? null : (getCategoryById(db, product.category_id) ?? null);
+    return { ...product, category, variants, attributes, images };
+  }
+
+  /** Scope lịch sử giá theo kênh/chi nhánh (biến thể phân biệt bằng cột variant_id). */
+  function priceScope(
+    channel: string | null,
+    branchId: number | null,
+  ): 'channel' | 'branch' | 'channel_branch' {
+    if (channel !== null && branchId !== null) return 'channel_branch';
+    if (channel !== null) return 'channel';
+    return 'branch';
+  }
+
+  function writePriceHistory(
+    db: DatabaseSync,
+    orgId: number,
+    productId: number,
+    variantId: number | null,
+    scope: string,
+    channel: string | null,
+    branchId: number | null,
+    oldPrice: number | null,
+    newPrice: number,
+    changedBy: number,
+    reason: string,
+  ): void {
+    db.prepare(
+      `INSERT INTO price_history
+        (org_id, product_id, variant_id, scope, channel, branch_id, old_price, new_price, changed_by, reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      orgId,
+      productId,
+      variantId,
+      scope,
+      channel,
+      branchId,
+      oldPrice,
+      newPrice,
+      changedBy,
+      reason,
+      new Date().toISOString(),
+    );
+  }
+
+  /** Lấy sản phẩm + kiểm tra tồn tại / cùng org. Trả false khi đã respond. */
+  function loadProductFor(
+    req: TenantRequest,
+    res: Response,
+    action: Parameters<typeof can>[1],
+  ): ProductRow | null {
+    const actor = req.user as SessionUser;
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return null;
+    }
+    const product = getProductById(db, productId);
+    if (!product) {
+      res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+      return null;
+    }
+    if (!can(actor, action, { orgId: product.org_id })) {
+      res.status(403).json({ error: 'Bạn không được phép thao tác này' });
+      return null;
+    }
+    return product;
+  }
+
+  // CSV import/export phải khai TRƯỚC route /api/products/:id để Express
+  // không nhầm 'import'/'export' thành :id.
+  app.post('/api/categories', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'manage-category', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'Bạn không được phép quản lý danh mục' });
+      return;
+    }
+    const body = req.body as { name?: unknown; parent_id?: unknown };
+    if (!isNonEmptyString(body.name)) {
+      res.status(400).json({ error: 'Tên danh mục bắt buộc' });
+      return;
+    }
+    let parentId: number | null = null;
+    if (body.parent_id !== undefined && body.parent_id !== null) {
+      parentId = Number(body.parent_id);
+      if (!Number.isInteger(parentId)) {
+        res.status(400).json({ error: 'parent_id không hợp lệ' });
+        return;
+      }
+      const parent = getCategoryById(db, parentId);
+      if (!parent) {
+        res.status(404).json({ error: 'Không tìm thấy danh mục cha' });
+        return;
+      }
+      if (parent.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Danh mục cha không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+      if (parent.parent_id !== null) {
+        res.status(400).json({ error: 'Danh mục chỉ có tối đa 1 cấp cha' });
+        return;
+      }
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare(
+          'INSERT INTO categories (org_id, name, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(actor.orgId, (body.name as string).trim(), parentId, now, now).lastInsertRowid,
+    );
+    const created = getCategoryById(db, id) as CategoryRow;
+    writeAudit(db, actor.orgId, actor.id, 'create-category', {
+      target_product_id: null,
+      before: null,
+      after: { category_id: id, name: created.name, parent_id: parentId },
+    });
+    res.status(201).json(created);
+  });
+
+  app.get('/api/categories', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const rows = db
+      .prepare('SELECT * FROM categories WHERE org_id = ? ORDER BY id')
+      .all(actor.orgId) as unknown as CategoryRow[];
+    res.json(rows);
+  });
+
+  app.patch('/api/categories/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const categoryId = Number(req.params.id);
+    if (!Number.isInteger(categoryId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const category = getCategoryById(db, categoryId);
+    if (!category) {
+      res.status(404).json({ error: 'Không tìm thấy danh mục' });
+      return;
+    }
+    if (
+      !can(actor, 'manage-category', { orgId: category.org_id })
+    ) {
+      res.status(403).json({ error: 'Bạn không được phép quản lý danh mục' });
+      return;
+    }
+    const body = req.body as { name?: unknown; parent_id?: unknown };
+    const before = { name: category.name, parent_id: category.parent_id };
+    let nextName = category.name;
+    if (body.name !== undefined) {
+      if (!isNonEmptyString(body.name)) {
+        res.status(400).json({ error: 'Tên danh mục bắt buộc' });
+        return;
+      }
+      nextName = (body.name as string).trim();
+    }
+    let nextParent = category.parent_id;
+    if (body.parent_id !== undefined) {
+      if (body.parent_id === null) {
+        nextParent = null;
+      } else {
+        nextParent = Number(body.parent_id);
+        if (!Number.isInteger(nextParent)) {
+          res.status(400).json({ error: 'parent_id không hợp lệ' });
+          return;
+        }
+        const parent = getCategoryById(db, nextParent);
+        if (!parent) {
+          res.status(404).json({ error: 'Không tìm thấy danh mục cha' });
+          return;
+        }
+        if (parent.org_id !== actor.orgId) {
+          res.status(403).json({ error: 'Danh mục cha không thuộc doanh nghiệp của bạn' });
+          return;
+        }
+        if (parent.parent_id !== null || nextParent === category.id) {
+          res.status(400).json({ error: 'Danh mục chỉ có tối đa 1 cấp cha' });
+          return;
+        }
+      }
+    }
+    db.prepare('UPDATE categories SET name = ?, parent_id = ?, updated_at = ? WHERE id = ?').run(
+      nextName,
+      nextParent,
+      new Date().toISOString(),
+      category.id,
+    );
+    writeAudit(db, actor.orgId, actor.id, 'update-category', {
+      target_product_id: null,
+      before,
+      after: { name: nextName, parent_id: nextParent },
+    });
+    res.json(getCategoryById(db, category.id) as CategoryRow);
+  });
+
+  app.post('/api/products', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'create-product', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'Bạn không được phép tạo sản phẩm' });
+      return;
+    }
+    const body = req.body as {
+      code?: unknown;
+      name?: unknown;
+      unit?: unknown;
+      price?: unknown;
+      min_stock?: unknown;
+      status?: unknown;
+      category_id?: unknown;
+    };
+    if (!isNonEmptyString(body.code)) {
+      res.status(400).json({ error: 'Mã sản phẩm bắt buộc' });
+      return;
+    }
+    if (!isNonEmptyString(body.name)) {
+      res.status(400).json({ error: 'Tên sản phẩm bắt buộc' });
+      return;
+    }
+    if (!isNonEmptyString(body.unit)) {
+      res.status(400).json({ error: 'Đơn vị tính bắt buộc' });
+      return;
+    }
+    if (!isIntMoney(body.price)) {
+      res.status(400).json({ error: 'Giá bán phải là số nguyên đồng >= 0' });
+      return;
+    }
+    let minStock = 0;
+    if (body.min_stock !== undefined) {
+      if (!isIntMoney(body.min_stock)) {
+        res.status(400).json({ error: 'min_stock phải là số nguyên >= 0' });
+        return;
+      }
+      minStock = body.min_stock as number;
+    }
+    let status: 'active' | 'discontinued' = 'active';
+    if (body.status !== undefined) {
+      if (body.status !== 'active' && body.status !== 'discontinued') {
+        res.status(400).json({ error: 'status không hợp lệ' });
+        return;
+      }
+      status = body.status;
+    }
+    let categoryId: number | null = null;
+    if (body.category_id !== undefined && body.category_id !== null) {
+      categoryId = Number(body.category_id);
+      if (!Number.isInteger(categoryId)) {
+        res.status(400).json({ error: 'category_id không hợp lệ' });
+        return;
+      }
+      const category = getCategoryById(db, categoryId);
+      if (!category) {
+        res.status(404).json({ error: 'Không tìm thấy danh mục' });
+        return;
+      }
+      if (category.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Danh mục không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    const code = (body.code as string).trim();
+    const dup = db
+      .prepare('SELECT id FROM products WHERE org_id = ? AND code = ?')
+      .get(actor.orgId, code);
+    if (dup) {
+      res.status(409).json({ error: `Mã sản phẩm ${code} đã tồn tại trong doanh nghiệp` });
+      return;
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare(
+          `INSERT INTO products (org_id, code, name, unit, price, min_stock, status, category_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          actor.orgId,
+          code,
+          (body.name as string).trim(),
+          (body.unit as string).trim(),
+          body.price,
+          minStock,
+          status,
+          categoryId,
+          now,
+          now,
+        ).lastInsertRowid,
+    );
+    const created = getProductById(db, id) as ProductRow;
+    writeAudit(db, actor.orgId, actor.id, 'create-product', {
+      target_product_id: id,
+      before: null,
+      after: { code, name: created.name, price: created.price, unit: created.unit, status },
+    });
+    res.status(201).json(created);
+  });
+
+  app.get('/api/products', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const categoryId =
+      typeof req.query.category_id === 'string' ? Number(req.query.category_id) : undefined;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : undefined;
+    const limit =
+      typeof req.query.limit === 'string' && Number.isInteger(Number(req.query.limit))
+        ? Math.max(0, Number(req.query.limit))
+        : 1000;
+    const offset =
+      typeof req.query.offset === 'string' && Number.isInteger(Number(req.query.offset))
+        ? Math.max(0, Number(req.query.offset))
+        : 0;
+    let sql = 'SELECT * FROM products WHERE org_id = ?';
+    const params: (string | number)[] = [actor.orgId];
+    if (status !== undefined) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+    if (categoryId !== undefined && Number.isInteger(categoryId)) {
+      sql += ' AND category_id = ?';
+      params.push(categoryId);
+    }
+    if (q !== undefined && q.length > 0) {
+      sql += ' AND (code LIKE ? OR name LIKE ?)';
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    sql += ' ORDER BY id LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    const rows = db.prepare(sql).all(...params) as unknown as ProductRow[];
+    res.json(rows);
+  });
+
+  // ---------- Giá theo kênh/chi nhánh + CSV (khai trước GET /:id) ----------
+
+  app.post('/api/products/:id/prices', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'change-price');
+    if (!product) return;
+    if (product.status === 'discontinued') {
+      res.status(400).json({ error: 'Sản phẩm đã ngừng kinh doanh, không được đổi giá mới' });
+      return;
+    }
+    const body = req.body as {
+      variant_id?: unknown;
+      channel?: unknown;
+      branch_id?: unknown;
+      price?: unknown;
+      reason?: unknown;
+    };
+    if (!isNonEmptyString(body.reason)) {
+      res.status(400).json({ error: 'Đổi giá phải kèm lý do (reason)' });
+      return;
+    }
+    if (!isIntMoney(body.price)) {
+      res.status(400).json({ error: 'Giá phải là số nguyên đồng >= 0' });
+      return;
+    }
+    let variantId: number | null = null;
+    if (body.variant_id !== undefined && body.variant_id !== null) {
+      variantId = Number(body.variant_id);
+      if (!Number.isInteger(variantId)) {
+        res.status(400).json({ error: 'variant_id không hợp lệ' });
+        return;
+      }
+      const variant = getVariantById(db, variantId);
+      if (!variant || variant.product_id !== product.id) {
+        res.status(404).json({ error: 'Không tìm thấy biến thể' });
+        return;
+      }
+    }
+    let channel: string | null = null;
+    if (body.channel !== undefined && body.channel !== null) {
+      if (typeof body.channel !== 'string' || !isAllowedChannel(body.channel)) {
+        res.status(400).json({ error: 'Kênh bán không hợp lệ (chỉ counter/web/api)' });
+        return;
+      }
+      channel = body.channel;
+    }
+    let branchId: number | null = null;
+    if (body.branch_id !== undefined && body.branch_id !== null) {
+      branchId = Number(body.branch_id);
+      if (!Number.isInteger(branchId)) {
+        res.status(400).json({ error: 'branch_id không hợp lệ' });
+        return;
+      }
+      const branch = db.prepare('SELECT org_id FROM branches WHERE id = ?').get(branchId) as
+        | { org_id: number }
+        | undefined;
+      if (!branch || branch.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Chi nhánh không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    if (channel === null && branchId === null) {
+      res.status(400).json({ error: 'Giá riêng phải ghi rõ kênh hoặc chi nhánh (hoặc cả hai)' });
+      return;
+    }
+    const price = body.price as number;
+    const reason = (body.reason as string).trim();
+    // UNIQUE + NULL trên SQLite không chặn trùng tổ hợp (variant/channel/
+    // branch) nên kiểm tra trùng ở tầng service trong cùng transaction.
+    const existing = (
+      db.prepare('SELECT * FROM product_prices WHERE product_id = ?').all(product.id) as unknown as PriceRow[]
+    ).find(
+      (r) =>
+        (r.variant_id ?? null) === variantId &&
+        (r.channel ?? null) === channel &&
+        (r.branch_id ?? null) === branchId,
+    );
+    const now = new Date().toISOString();
+    const scope = priceScope(channel, branchId);
+    if (existing) {
+      if (existing.price === price) {
+        res.status(400).json({ error: 'Giá mới trùng giá hiện tại' });
+        return;
+      }
+      db.prepare('UPDATE product_prices SET price = ?, updated_at = ? WHERE id = ?').run(
+        price,
+        now,
+        existing.id,
+      );
+      writePriceHistory(
+        db, actor.orgId, product.id, variantId, scope, channel, branchId,
+        existing.price, price, actor.id, reason,
+      );
+      writeAudit(db, actor.orgId, actor.id, 'change-price', {
+        target_product_id: product.id,
+        before: { variant_id: variantId, channel, branch_id: branchId, price: existing.price },
+        after: { variant_id: variantId, channel, branch_id: branchId, price, reason },
+      });
+      const updated = db.prepare('SELECT * FROM product_prices WHERE id = ?').get(existing.id) as unknown as PriceRow;
+      res.status(201).json(updated);
+      return;
+    }
+    const id = Number(
+      db
+        .prepare(
+          `INSERT INTO product_prices (org_id, product_id, variant_id, channel, branch_id, price, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(actor.orgId, product.id, variantId, channel, branchId, price, now, now).lastInsertRowid,
+    );
+    writePriceHistory(
+      db, actor.orgId, product.id, variantId, scope, channel, branchId,
+      null, price, actor.id, reason,
+    );
+    writeAudit(db, actor.orgId, actor.id, 'change-price', {
+      target_product_id: product.id,
+      before: { variant_id: variantId, channel, branch_id: branchId, price: null },
+      after: { variant_id: variantId, channel, branch_id: branchId, price, reason },
+    });
+    const created = db.prepare('SELECT * FROM product_prices WHERE id = ?').get(id) as unknown as PriceRow;
+    res.status(201).json(created);
+  });
+
+  app.get('/api/products/:id/prices', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const product = getProductById(db, productId);
+    if (!product) {
+      res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+      return;
+    }
+    if (product.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Không được truy cập dữ liệu ngoài doanh nghiệp của bạn' });
+      return;
+    }
+    let rows = db
+      .prepare('SELECT * FROM product_prices WHERE product_id = ? ORDER BY id')
+      .all(product.id) as unknown as PriceRow[];
+    // User bị giới hạn chi nhánh chỉ thấy giá áp mọi chi nhánh + giá đúng
+    // chi nhánh của mình; owner/manager thấy mọi chi nhánh.
+    if (actor.role !== 'owner' && actor.role !== 'manager' && actor.branchId !== null) {
+      rows = rows.filter((r) => r.branch_id === null || r.branch_id === actor.branchId);
+    }
+    res.json(rows);
+  });
+
+  app.get('/api/products/:id/price', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const product = getProductById(db, productId);
+    if (!product) {
+      res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+      return;
+    }
+    if (product.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Không được truy cập dữ liệu ngoài doanh nghiệp của bạn' });
+      return;
+    }
+    const channel = typeof req.query.channel === 'string' ? req.query.channel : null;
+    let branchId: number | null = null;
+    if (req.query.branch_id !== undefined) {
+      branchId = Number(req.query.branch_id);
+      if (!Number.isInteger(branchId)) {
+        res.status(400).json({ error: 'branch_id không hợp lệ' });
+        return;
+      }
+      if (!can(actor, 'view-branch-price', { orgId: actor.orgId, branchId })) {
+        res.status(403).json({ error: 'Bạn không được xem giá riêng của chi nhánh này' });
+        return;
+      }
+    }
+    let variantId: number | null = null;
+    let variant: VariantRow | undefined;
+    if (req.query.variant_id !== undefined) {
+      variantId = Number(req.query.variant_id);
+      if (!Number.isInteger(variantId)) {
+        res.status(400).json({ error: 'variant_id không hợp lệ' });
+        return;
+      }
+      variant = getVariantById(db, variantId);
+      if (!variant || variant.product_id !== product.id) {
+        res.status(404).json({ error: 'Không tìm thấy biến thể' });
+        return;
+      }
+    }
+    const rows = db
+      .prepare('SELECT * FROM product_prices WHERE product_id = ?')
+      .all(product.id) as unknown as PriceRow[];
+    const findPrice = (
+      wantVariant: number | null,
+      wantChannel: string | null,
+      wantBranch: number | null,
+    ): number | null => {
+      const row = rows.find(
+        (r) =>
+          (r.variant_id ?? null) === wantVariant &&
+          (r.channel ?? null) === wantChannel &&
+          (r.branch_id ?? null) === wantBranch,
+      );
+      return row ? row.price : null;
+    };
+    const result = effectivePrice({
+      basePrice: product.price,
+      variantOverride: variant?.price_override ?? null,
+      variantChannelBranch: variantId === null ? null : findPrice(variantId, channel, branchId),
+      variantChannel: variantId === null ? null : findPrice(variantId, channel, null),
+      variantBranch: variantId === null ? null : findPrice(variantId, null, branchId),
+      productChannelBranch: findPrice(null, channel, branchId),
+      productChannel: findPrice(null, channel, null),
+      productBranch: findPrice(null, null, branchId),
+    });
+    res.json({
+      product_id: product.id,
+      variant_id: variantId,
+      channel,
+      branch_id: branchId,
+      price: result.price,
+      source: result.source,
+    });
+  });
+
+  app.get('/api/products/:id/price-history', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'view-price-history');
+    if (!product) return;
+    const rows = db
+      .prepare('SELECT * FROM price_history WHERE product_id = ? ORDER BY id DESC')
+      .all(product.id) as unknown as Record<string, unknown>[];
+    res.json(rows);
+  });
+
+  interface CsvImportRow {
+    code: string;
+    name: string;
+    price: number;
+    unit: string;
+    min_stock: number;
+    status: 'active' | 'discontinued';
+    category: string;
+    barcode: string;
+  }
+
+  interface CsvRowError {
+    line: number;
+    reason: string;
+  }
+
+  function parseIntCell(value: string | undefined): number | null {
+    if (value === undefined) return null;
+    const trimmed = value.trim();
+    if (!/^-?\d+$/.test(trimmed)) return null;
+    return Number(trimmed);
+  }
+
+  /** Validate toàn bộ dòng CSV trước khi ghi. Trả valid + lỗi từng dòng. */
+  function validateCsvRows(
+    db: DatabaseSync,
+    orgId: number,
+    rows: { line: number; record: Record<string, string> }[],
+  ): { valid: (CsvImportRow & { line: number })[]; errors: CsvRowError[] } {
+    const errors: CsvRowError[] = [];
+    const codeCounts = new Map<string, number>();
+    for (const { record } of rows) {
+      const code = (record.code ?? '').trim();
+      if (code !== '') codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+    }
+    const existingCodes = new Set(
+      (
+        db.prepare('SELECT code FROM products WHERE org_id = ?').all(orgId) as { code: string }[]
+      ).map((r) => r.code),
+    );
+    const valid: (CsvImportRow & { line: number })[] = [];
+    for (const { line, record } of rows) {
+      const code = (record.code ?? '').trim();
+      const name = (record.name ?? '').trim();
+      const unit = (record.unit ?? '').trim();
+      const priceRaw = (record.price ?? '').trim();
+      const minStockRaw = (record.min_stock ?? '').trim();
+      const statusRaw = (record.status ?? '').trim();
+      const category = (record.category ?? '').trim();
+      const barcode = (record.barcode ?? '').trim();
+      const rowErrors: string[] = [];
+      if (code === '') rowErrors.push('thiếu mã sản phẩm (code)');
+      else if ((codeCounts.get(code) ?? 0) > 1) rowErrors.push(`mã ${code} trùng nhau trong file`);
+      else if (existingCodes.has(code)) rowErrors.push(`mã ${code} đã tồn tại trong doanh nghiệp (trùng mã)`);
+      if (name === '') rowErrors.push('thiếu tên sản phẩm (name)');
+      const price = parseIntCell(priceRaw);
+      if (price === null) rowErrors.push(`giá ${priceRaw === '' ? '(trống)' : priceRaw} không phải số nguyên`);
+      else if (price < 0) rowErrors.push(`giá ${price} âm, phải >= 0`);
+      if (unit === '') rowErrors.push('thiếu đơn vị tính (unit)');
+      let minStock = 0;
+      if (minStockRaw !== '') {
+        const parsed = parseIntCell(minStockRaw);
+        if (parsed === null || parsed < 0) rowErrors.push(`min_stock ${minStockRaw} phải là số nguyên >= 0`);
+        else minStock = parsed;
+      }
+      let status: 'active' | 'discontinued' = 'active';
+      if (statusRaw !== '') {
+        if (statusRaw !== 'active' && statusRaw !== 'discontinued') {
+          rowErrors.push(`status ${statusRaw} không hợp lệ (chỉ active/discontinued)`);
+        } else {
+          status = statusRaw;
+        }
+      }
+      if (rowErrors.length > 0) {
+        for (const reason of rowErrors) errors.push({ line, reason });
+        continue;
+      }
+      valid.push({
+        line, code, name, price: price as number, unit, min_stock: minStock, status, category, barcode,
+      });
+    }
+    return { valid, errors };
+  }
+
+  const CSV_REQUIRED_COLUMNS = ['code', 'name', 'price', 'unit'];
+
+  function readCsvUpload(
+    req: TenantRequest,
+    res: Response,
+  ): { header: string[]; rows: { line: number; record: Record<string, string> }[] } | null {
+    const file = (req as unknown as { file?: { buffer: Buffer; originalname: string } }).file;
+    if (!file) {
+      res.status(400).json({ error: 'Thiếu file CSV (multipart field file)' });
+      return null;
+    }
+    const text = file.buffer.toString('utf8');
+    if (text.trim() === '') {
+      res.status(400).json({ error: 'File CSV rỗng' });
+      return null;
+    }
+    let parsed: { header: string[]; rows: { line: number; record: Record<string, string> }[] };
+    try {
+      parsed = parseProductCsvWithLines(text);
+    } catch {
+      res.status(400).json({ error: 'File CSV không đọc được' });
+      return null;
+    }
+    const missing = CSV_REQUIRED_COLUMNS.filter((c) => !parsed.header.includes(c));
+    if (missing.length > 0) {
+      res.status(400).json({ error: `Header thiếu cột bắt buộc: ${missing.join(', ')}` });
+      return null;
+    }
+    return parsed;
+  }
+
+  app.post(
+    '/api/products/import/preview',
+    requireAuth,
+    uploadCsv.single('file'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      if (!can(actor, 'import-csv', { orgId: actor.orgId })) {
+        res.status(403).json({ error: 'Bạn không được phép nhập CSV' });
+        return;
+      }
+      const parsed = readCsvUpload(req, res);
+      if (!parsed) return;
+      const { valid, errors } = validateCsvRows(db, actor.orgId, parsed.rows);
+      res.json({
+        valid,
+        errors,
+        summary: { total: parsed.rows.length, valid: valid.length, errors: errors.length },
+      });
+    },
+  );
+
+  app.post(
+    '/api/products/import',
+    requireAuth,
+    uploadCsv.single('file'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      if (!can(actor, 'import-csv', { orgId: actor.orgId })) {
+        res.status(403).json({ error: 'Bạn không được phép nhập CSV' });
+        return;
+      }
+      const parsed = readCsvUpload(req, res);
+      if (!parsed) return;
+      if (parsed.rows.length > 1000) {
+        res.status(400).json({ error: 'File CSV vượt quá 1000 dòng' });
+        return;
+      }
+      const { valid, errors } = validateCsvRows(db, actor.orgId, parsed.rows);
+      if (errors.length > 0) {
+        res.status(422).json({ errors });
+        return;
+      }
+      const filename =
+        (req as unknown as { file?: { originalname: string } }).file?.originalname ?? 'import.csv';
+      const now = new Date().toISOString();
+      const importedCodes: string[] = [];
+      try {
+        db.exec('BEGIN IMMEDIATE');
+        for (const row of valid) {
+          let categoryId: number | null = null;
+          if (row.category !== '') {
+            const found = db
+              .prepare('SELECT id FROM categories WHERE org_id = ? AND name = ?')
+              .get(actor.orgId, row.category) as { id: number } | undefined;
+            if (found) {
+              categoryId = found.id;
+            } else {
+              categoryId = Number(
+                db
+                  .prepare(
+                    'INSERT INTO categories (org_id, name, parent_id, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)',
+                  )
+                  .run(actor.orgId, row.category, now, now).lastInsertRowid,
+              );
+            }
+          }
+          db.prepare(
+            `INSERT INTO products (org_id, code, name, unit, price, min_stock, status, category_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            actor.orgId, row.code, row.name, row.unit, row.price,
+            row.min_stock, row.status, categoryId, now, now,
+          );
+          importedCodes.push(row.code);
+        }
+        writeAudit(db, actor.orgId, actor.id, 'import-csv', {
+          target_product_id: null,
+          before: null,
+          after: { imported: valid.length, filename, codes: importedCodes },
+        });
+        db.exec('COMMIT');
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          // Đã rollback hoặc chưa BEGIN: bỏ qua.
+        }
+        throw err;
+      }
+      res.status(201).json({ imported: valid.length });
+    },
+  );
+
+  app.get('/api/products/export', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'export-csv', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'Bạn không được phép xuất CSV' });
+      return;
+    }
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const categoryId =
+      typeof req.query.category_id === 'string' ? Number(req.query.category_id) : undefined;
+    let sql = 'SELECT * FROM products WHERE org_id = ?';
+    const params: (string | number)[] = [actor.orgId];
+    if (status !== undefined) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+    if (categoryId !== undefined && Number.isInteger(categoryId)) {
+      sql += ' AND category_id = ?';
+      params.push(categoryId);
+    }
+    sql += ' ORDER BY id';
+    const products = db.prepare(sql).all(...params) as unknown as ProductRow[];
+    const rows = products.map((p) => {
+      const category =
+        p.category_id === null ? '' : (getCategoryById(db, p.category_id)?.name ?? '');
+      const barcodeRow = db
+        .prepare(
+          'SELECT barcode FROM product_variants WHERE product_id = ? AND barcode IS NOT NULL ORDER BY id LIMIT 1',
+        )
+        .get(p.id) as { barcode: string } | undefined;
+      return {
+        code: p.code,
+        name: p.name,
+        price: p.price,
+        unit: p.unit,
+        min_stock: p.min_stock,
+        status: p.status,
+        category,
+        barcode: barcodeRow?.barcode ?? '',
+      };
+    });
+    const csv = stringify(rows, {
+      header: true,
+      columns: ['code', 'name', 'price', 'unit', 'min_stock', 'status', 'category', 'barcode'],
+    });
+    res.type('text/csv; charset=utf-8').send(csv);
+  });
+
+  app.get('/api/products/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const product = getProductById(db, productId);
+    if (!product) {
+      res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+      return;
+    }
+    if (product.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Không được truy cập dữ liệu ngoài doanh nghiệp của bạn' });
+      return;
+    }
+    res.json(productDetail(db, product));
+  });
+
+  app.patch('/api/products/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'update-product');
+    if (!product) return;
+    const body = req.body as {
+      name?: unknown;
+      unit?: unknown;
+      price?: unknown;
+      min_stock?: unknown;
+      category_id?: unknown;
+      reason?: unknown;
+    };
+    const before: Record<string, unknown> = {
+      name: product.name,
+      unit: product.unit,
+      price: product.price,
+      min_stock: product.min_stock,
+      category_id: product.category_id,
+    };
+    let nextName = product.name;
+    let nextUnit = product.unit;
+    let nextMinStock = product.min_stock;
+    let nextCategoryId = product.category_id;
+    let nextPrice = product.price;
+    let priceChanged = false;
+    if (body.name !== undefined) {
+      if (!isNonEmptyString(body.name)) {
+        res.status(400).json({ error: 'Tên sản phẩm bắt buộc' });
+        return;
+      }
+      nextName = (body.name as string).trim();
+    }
+    if (body.unit !== undefined) {
+      if (!isNonEmptyString(body.unit)) {
+        res.status(400).json({ error: 'Đơn vị tính bắt buộc' });
+        return;
+      }
+      nextUnit = (body.unit as string).trim();
+    }
+    if (body.min_stock !== undefined) {
+      if (!isIntMoney(body.min_stock)) {
+        res.status(400).json({ error: 'min_stock phải là số nguyên >= 0' });
+        return;
+      }
+      nextMinStock = body.min_stock as number;
+    }
+    if (body.category_id !== undefined) {
+      if (body.category_id === null) {
+        nextCategoryId = null;
+      } else {
+        nextCategoryId = Number(body.category_id);
+        if (!Number.isInteger(nextCategoryId)) {
+          res.status(400).json({ error: 'category_id không hợp lệ' });
+          return;
+        }
+        const category = getCategoryById(db, nextCategoryId);
+        if (!category) {
+          res.status(404).json({ error: 'Không tìm thấy danh mục' });
+          return;
+        }
+        if (category.org_id !== actor.orgId) {
+          res.status(403).json({ error: 'Danh mục không thuộc doanh nghiệp của bạn' });
+          return;
+        }
+      }
+    }
+    if (body.price !== undefined) {
+      if (!isIntMoney(body.price)) {
+        res.status(400).json({ error: 'Giá bán phải là số nguyên đồng >= 0' });
+        return;
+      }
+      if (!isNonEmptyString(body.reason)) {
+        res.status(400).json({ error: 'Đổi giá bán phải kèm lý do (reason)' });
+        return;
+      }
+      if (product.status === 'discontinued') {
+        res.status(400).json({ error: 'Sản phẩm đã ngừng kinh doanh, không được đổi giá mới' });
+        return;
+      }
+      if (body.price === product.price) {
+        res.status(400).json({ error: 'Giá mới trùng giá hiện tại' });
+        return;
+      }
+      nextPrice = body.price as number;
+      priceChanged = true;
+    }
+    db.prepare(
+      'UPDATE products SET name = ?, unit = ?, price = ?, min_stock = ?, category_id = ?, updated_at = ? WHERE id = ?',
+    ).run(nextName, nextUnit, nextPrice, nextMinStock, nextCategoryId, new Date().toISOString(), product.id);
+    const after = { name: nextName, unit: nextUnit, price: nextPrice, min_stock: nextMinStock, category_id: nextCategoryId };
+    if (priceChanged) {
+      writePriceHistory(
+        db,
+        actor.orgId,
+        product.id,
+        null,
+        'base',
+        null,
+        null,
+        product.price,
+        nextPrice,
+        actor.id,
+        (body.reason as string).trim(),
+      );
+      writeAudit(db, actor.orgId, actor.id, 'change-price', {
+        target_product_id: product.id,
+        before: { price: product.price },
+        after: { price: nextPrice, reason: (body.reason as string).trim() },
+      });
+    } else {
+      writeAudit(db, actor.orgId, actor.id, 'update-product', {
+        target_product_id: product.id,
+        before,
+        after,
+      });
+    }
+    res.json(getProductById(db, product.id) as ProductRow);
+  });
+
+  app.patch('/api/products/:id/status', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'discontinue-product');
+    if (!product) return;
+    const status = (req.body as { status?: unknown }).status;
+    if (status !== 'active' && status !== 'discontinued') {
+      res.status(400).json({ error: 'status phải là active hoặc discontinued' });
+      return;
+    }
+    const before = { status: product.status };
+    db.prepare('UPDATE products SET status = ?, updated_at = ? WHERE id = ?').run(
+      status,
+      new Date().toISOString(),
+      product.id,
+    );
+    writeAudit(db, actor.orgId, actor.id, status === 'discontinued' ? 'discontinue-product' : 'reopen-product', {
+      target_product_id: product.id,
+      before,
+      after: { status },
+    });
+    res.json(getProductById(db, product.id) as ProductRow);
+  });
+
+  app.post('/api/products/:id/variants', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'create-product');
+    if (!product) return;
+    if (product.status === 'discontinued') {
+      res.status(400).json({ error: 'Sản phẩm đã ngừng kinh doanh, không được tạo biến thể mới' });
+      return;
+    }
+    const body = req.body as { sku?: unknown; name?: unknown; barcode?: unknown; price_override?: unknown };
+    if (!isNonEmptyString(body.sku)) {
+      res.status(400).json({ error: 'SKU bắt buộc' });
+      return;
+    }
+    if (!isNonEmptyString(body.name)) {
+      res.status(400).json({ error: 'Tên biến thể bắt buộc' });
+      return;
+    }
+    let priceOverride: number | null = null;
+    if (body.price_override !== undefined && body.price_override !== null) {
+      if (!isIntMoney(body.price_override)) {
+        res.status(400).json({ error: 'price_override phải là số nguyên đồng >= 0' });
+        return;
+      }
+      priceOverride = body.price_override as number;
+    }
+    let barcode: string | null = null;
+    if (body.barcode !== undefined && body.barcode !== null) {
+      if (typeof body.barcode !== 'string' || body.barcode.trim().length === 0) {
+        res.status(400).json({ error: 'barcode không hợp lệ' });
+        return;
+      }
+      barcode = (body.barcode as string).trim();
+    }
+    const sku = (body.sku as string).trim();
+    const dupSku = db
+      .prepare('SELECT id FROM product_variants WHERE org_id = ? AND sku = ?')
+      .get(actor.orgId, sku);
+    if (dupSku) {
+      res.status(409).json({ error: `SKU ${sku} đã tồn tại trong doanh nghiệp` });
+      return;
+    }
+    if (barcode !== null) {
+      const dupBarcode = db
+        .prepare('SELECT id FROM product_variants WHERE org_id = ? AND barcode = ?')
+        .get(actor.orgId, barcode);
+      if (dupBarcode) {
+        res.status(409).json({ error: `Mã vạch ${barcode} đã tồn tại trong doanh nghiệp` });
+        return;
+      }
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare(
+          `INSERT INTO product_variants (org_id, product_id, sku, name, barcode, price_override, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(actor.orgId, product.id, sku, (body.name as string).trim(), barcode, priceOverride, now, now)
+        .lastInsertRowid,
+    );
+    const created = getVariantById(db, id) as VariantRow;
+    writeAudit(db, actor.orgId, actor.id, 'create-variant', {
+      target_product_id: product.id,
+      before: null,
+      after: { variant_id: id, sku, name: created.name, barcode, price_override: priceOverride },
+    });
+    res.status(201).json(created);
+  });
+
+  app.get('/api/products/:id/variants', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const product = getProductById(db, productId);
+    if (!product) {
+      res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+      return;
+    }
+    if (product.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Không được truy cập dữ liệu ngoài doanh nghiệp của bạn' });
+      return;
+    }
+    const rows = db
+      .prepare('SELECT * FROM product_variants WHERE product_id = ? ORDER BY id')
+      .all(product.id) as unknown as VariantRow[];
+    res.json(rows);
+  });
+
+  app.patch(
+    '/api/products/:id/variants/:variantId',
+    requireAuth,
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const product = loadProductFor(req, res, 'update-product');
+      if (!product) return;
+      const variantId = Number(req.params.variantId);
+      if (!Number.isInteger(variantId)) {
+        res.status(400).json({ error: 'variantId không hợp lệ' });
+        return;
+      }
+      const variant = getVariantById(db, variantId);
+      if (!variant || variant.product_id !== product.id) {
+        res.status(404).json({ error: 'Không tìm thấy biến thể' });
+        return;
+      }
+      const body = req.body as { name?: unknown; barcode?: unknown; price_override?: unknown };
+      let nextName = variant.name;
+      let nextBarcode = variant.barcode;
+      let nextOverride = variant.price_override;
+      let overrideChanged = false;
+      if (body.name !== undefined) {
+        if (!isNonEmptyString(body.name)) {
+          res.status(400).json({ error: 'Tên biến thể bắt buộc' });
+          return;
+        }
+        nextName = (body.name as string).trim();
+      }
+      if (body.barcode !== undefined) {
+        if (body.barcode === null) {
+          nextBarcode = null;
+        } else {
+          if (typeof body.barcode !== 'string' || body.barcode.trim().length === 0) {
+            res.status(400).json({ error: 'barcode không hợp lệ' });
+            return;
+          }
+          nextBarcode = (body.barcode as string).trim();
+          if (nextBarcode !== variant.barcode) {
+            const dup = db
+              .prepare('SELECT id FROM product_variants WHERE org_id = ? AND barcode = ? AND id <> ?')
+              .get(actor.orgId, nextBarcode, variant.id);
+            if (dup) {
+              res.status(409).json({ error: `Mã vạch ${nextBarcode} đã tồn tại trong doanh nghiệp` });
+              return;
+            }
+          }
+        }
+      }
+      if (body.price_override !== undefined) {
+        if (body.price_override === null) {
+          nextOverride = null;
+        } else {
+          if (!isIntMoney(body.price_override)) {
+            res.status(400).json({ error: 'price_override phải là số nguyên đồng >= 0' });
+            return;
+          }
+          nextOverride = body.price_override as number;
+        }
+        if (nextOverride !== variant.price_override) {
+          if (product.status === 'discontinued') {
+            res.status(400).json({ error: 'Sản phẩm đã ngừng kinh doanh, không được đổi giá mới' });
+            return;
+          }
+          overrideChanged = true;
+        }
+      }
+      db.prepare(
+        'UPDATE product_variants SET name = ?, barcode = ?, price_override = ?, updated_at = ? WHERE id = ?',
+      ).run(nextName, nextBarcode, nextOverride, new Date().toISOString(), variant.id);
+      if (overrideChanged && nextOverride !== null) {
+        writePriceHistory(
+          db,
+          actor.orgId,
+          product.id,
+          variant.id,
+          'variant_override',
+          null,
+          null,
+          variant.price_override,
+          nextOverride,
+          actor.id,
+          'đổi giá override biến thể',
+        );
+        writeAudit(db, actor.orgId, actor.id, 'change-price', {
+          target_product_id: product.id,
+          before: { variant_id: variant.id, price_override: variant.price_override },
+          after: { variant_id: variant.id, price_override: nextOverride },
+        });
+      } else {
+        writeAudit(db, actor.orgId, actor.id, 'update-variant', {
+          target_product_id: product.id,
+          before: { name: variant.name, barcode: variant.barcode, price_override: variant.price_override },
+          after: { name: nextName, barcode: nextBarcode, price_override: nextOverride },
+        });
+      }
+      res.json(getVariantById(db, variant.id) as VariantRow);
+    },
+  );
+
+  app.post('/api/products/:id/attributes', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'update-product');
+    if (!product) return;
+    const body = req.body as { key?: unknown; value?: unknown };
+    if (!isNonEmptyString(body.key)) {
+      res.status(400).json({ error: 'key thuộc tính bắt buộc' });
+      return;
+    }
+    if (typeof body.value !== 'string') {
+      res.status(400).json({ error: 'value thuộc tính bắt buộc' });
+      return;
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare('INSERT INTO product_attributes (product_id, key, value, created_at) VALUES (?, ?, ?, ?)')
+        .run(product.id, (body.key as string).trim(), body.value as string, now).lastInsertRowid,
+    );
+    const created = db.prepare('SELECT * FROM product_attributes WHERE id = ?').get(id) as Record<
+      string,
+      unknown
+    >;
+    writeAudit(db, actor.orgId, actor.id, 'update-product', {
+      target_product_id: product.id,
+      before: null,
+      after: { attribute_id: id, key: (body.key as string).trim(), value: body.value },
+    });
+    res.status(201).json(created);
+  });
+
+  app.delete(
+    '/api/products/:id/attributes/:attrId',
+    requireAuth,
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const product = loadProductFor(req, res, 'update-product');
+      if (!product) return;
+      const attrId = Number(req.params.attrId);
+      if (!Number.isInteger(attrId)) {
+        res.status(400).json({ error: 'attrId không hợp lệ' });
+        return;
+      }
+      const attr = db.prepare('SELECT * FROM product_attributes WHERE id = ?').get(attrId) as
+        | { id: number; product_id: number; key: string }
+        | undefined;
+      if (!attr || attr.product_id !== product.id) {
+        res.status(404).json({ error: 'Không tìm thấy thuộc tính' });
+        return;
+      }
+      db.prepare('DELETE FROM product_attributes WHERE id = ?').run(attrId);
+      writeAudit(db, actor.orgId, actor.id, 'update-product', {
+        target_product_id: product.id,
+        before: { attribute_id: attrId, key: attr.key },
+        after: null,
+      });
+      res.json({ ok: true });
+    },
+  );
+
+  app.post('/api/products/:id/images', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const product = loadProductFor(req, res, 'update-product');
+    if (!product) return;
+    const body = req.body as { url?: unknown; alt_text?: unknown; sort_order?: unknown };
+    if (!isNonEmptyString(body.url)) {
+      res.status(400).json({ error: 'url ảnh bắt buộc (chỉ metadata/đường dẫn, không upload file)' });
+      return;
+    }
+    const altText =
+      body.alt_text === undefined || body.alt_text === null ? null : String(body.alt_text);
+    let sortOrder = 0;
+    if (body.sort_order !== undefined) {
+      if (typeof body.sort_order !== 'number' || !Number.isInteger(body.sort_order)) {
+        res.status(400).json({ error: 'sort_order phải là số nguyên' });
+        return;
+      }
+      sortOrder = body.sort_order;
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare(
+          'INSERT INTO product_images (product_id, url, alt_text, sort_order, created_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(product.id, (body.url as string).trim(), altText, sortOrder, now).lastInsertRowid,
+    );
+    const created = db.prepare('SELECT * FROM product_images WHERE id = ?').get(id) as Record<
+      string,
+      unknown
+    >;
+    writeAudit(db, actor.orgId, actor.id, 'update-product', {
+      target_product_id: product.id,
+      before: null,
+      after: { image_id: id, url: (body.url as string).trim() },
+    });
+    res.status(201).json(created);
+  });
+
+  app.delete(
+    '/api/products/:id/images/:imageId',
+    requireAuth,
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const product = loadProductFor(req, res, 'update-product');
+      if (!product) return;
+      const imageId = Number(req.params.imageId);
+      if (!Number.isInteger(imageId)) {
+        res.status(400).json({ error: 'imageId không hợp lệ' });
+        return;
+      }
+      const image = db.prepare('SELECT * FROM product_images WHERE id = ?').get(imageId) as
+        | { id: number; product_id: number; url: string }
+        | undefined;
+      if (!image || image.product_id !== product.id) {
+        res.status(404).json({ error: 'Không tìm thấy ảnh' });
+        return;
+      }
+      db.prepare('DELETE FROM product_images WHERE id = ?').run(imageId);
+      writeAudit(db, actor.orgId, actor.id, 'update-product', {
+        target_product_id: product.id,
+        before: { image_id: imageId, url: image.url },
+        after: null,
+      });
+      res.json({ ok: true });
+    },
+  );
 
   app.post(
     '/api/idempotent-demo',

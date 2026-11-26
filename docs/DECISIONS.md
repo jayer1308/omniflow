@@ -142,3 +142,49 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   thiết vì khóa và thu hồi khác nhau về tính cuối cùng; giữ row khi thu hồi
   vì `audit_log.user_id` FK tới `users`, xóa row sẽ vỡ FK.
 - Đổi khi: không — nguyên tắc mô hình user của GOAL-002.
+
+## D15 — Mô hình sản phẩm/biến thể/SKU/barcode + giá fallback + CSV atomic (26/11/2026)
+
+- Quyết định: sản phẩm là dữ liệu **cấp org** (`products` có `org_id`,
+  KHÔNG có `branch_id`); phạm vi chi nhánh chỉ gate **giá riêng theo chi
+  nhánh**. Biến thể thuộc sản phẩm cha, SKU duy nhất trong org
+  (`UNIQUE(org_id, sku)`), mã sản phẩm duy nhất trong org
+  (`UNIQUE(org_id, code)`), barcode optional và duy nhất trong org nếu có
+  (`UNIQUE(org_id, barcode)` — SQLite cho nhiều NULL, đúng ý). Trùng
+  SKU/mã/barcode → 409, không ghi đè lặng lẽ. Không có endpoint DELETE sản
+  phẩm/biến thể (chỉ ngừng kinh doanh, giữ lịch sử cho GOAL-004/005).
+- Giá lưu số nguyên đồng (D10). Kênh bán cho phép chốt 3 kênh:
+  `counter`/`web`/`api`; kênh lạ → 400. Fallback giá 8 bước theo
+  `docs/PRICING.md` (biến thể kênh+chi nhánh → biến thể kênh → biến thể chi
+  nhánh → sản phẩm kênh+chi nhánh → sản phẩm kênh → sản phẩm chi nhánh →
+  `price_override` → giá chuẩn), kèm trường `source`. Đổi giá bắt buộc có
+  `reason`; giá mới trùng giá hiện tại → 400 để tránh log rác. Lịch sử giá
+  append-only, không API sửa/xóa.
+- `UNIQUE(org_id, product_id, variant_id, channel, branch_id)` trên
+  `product_prices` KHÔNG chặn trùng khi có NULL (SQLite coi NULL khác nhau)
+  nên service kiểm tra trùng bằng SELECT trong cùng transaction; đặt lại
+  cùng tổ hợp thì ghi đè mức cũ + ghi lịch sử, không tạo dòng trùng.
+- CSV import là toàn bộ hoặc không (atomic): validate hết mọi dòng trước,
+  báo lỗi từng dòng (số dòng + lý do, header là dòng 1), một dòng lỗi → 422
+  và 0 dòng được ghi. Giới hạn 1000 dòng/file. Dùng thư viện `csv-parse` /
+  `csv-stringify` (xử lý BOM, dấu phẩy trong tên, dòng trống) + `multer`
+  cho multipart. Danh mục trong CSV là tên: chưa có thì import tự tạo danh
+  mục đó trong org.
+- Lý do: các quyết định này đều đã ghi trong brief GOAL-003; chốt lại ở đây
+  để GOAL-004/005 dùng chung (giá tại thời điểm đặt đơn, tồn kho theo biến
+  thể) không phải đoán lại.
+- Đổi khi: thêm kênh bán mới, hoặc cần giá theo thời gian/khuyến mãi
+  (GOAL-009 — giá riêng không phải khuyến mãi).
+
+## D16 — CSV chỉ nhập sản phẩm gốc; ảnh chỉ metadata, chưa upload thật (26/11/2026)
+
+- Quyết định: CSV import chỉ nhập **sản phẩm gốc** (một dòng = một sản phẩm,
+  có giá chuẩn); biến thể chỉ tạo qua API, không nhập qua CSV. Cột `barcode`
+  trong CSV được chấp nhận nhưng **không tạo biến thể** nên giá trị không
+  được lưu. Ảnh sản phẩm chỉ lưu metadata (`url`/`path` + `alt_text` + thứ
+  tự hiển thị) ở bảng `product_images`; KHÔNG có endpoint upload file thật,
+  KHÔNG lưu file nhị phân, KHÔNG resize/CDN.
+- Lý do: giữ phạm vi GOAL-003 gọn (import biến thể cần quy tắc SKU/barcode
+  riêng và xử lý lỗi phức tạp hơn); upload thật cần quyết định lưu trữ riêng.
+- Đổi khi: Goal riêng cho import biến thể qua CSV, hoặc Goal riêng cho
+  upload ảnh thật.

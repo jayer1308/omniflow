@@ -55,7 +55,52 @@ export function seed(db: DatabaseSync, passwords: SeedPasswords): SeedResult {
   db.prepare(
     'INSERT INTO users (org_id, branch_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)',
   ).run(orgId, branchId, STAFF_EMAIL, staffHash, 'sales', now);
+  seedSampleProducts(db, orgId);
   return { orgId, branchId, ownerEmail: OWNER_EMAIL, staffEmail: STAFF_EMAIL };
+}
+
+/**
+ * Sản phẩm mẫu GIẢ LẬP (GOAL-003): 2 danh mục, 2 sản phẩm, 1 biến thể,
+ * 1 giá riêng theo kênh. Chỉ chạy khi migration 008 đã tạo bảng products
+ * (DB cũ chưa migrate thì bỏ qua, không vỡ seed).
+ */
+function seedSampleProducts(db: DatabaseSync, orgId: number): void {
+  const hasProducts = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'products'")
+    .get() as { name: string } | undefined;
+  if (!hasProducts) return;
+  const now = new Date().toISOString();
+  const catClothes = Number(
+    db
+      .prepare('INSERT INTO categories (org_id, name, parent_id, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)')
+      .run(orgId, 'Quần áo', now, now).lastInsertRowid,
+  );
+  const catHome = Number(
+    db
+      .prepare('INSERT INTO categories (org_id, name, parent_id, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)')
+      .run(orgId, 'Đồ gia dụng', now, now).lastInsertRowid,
+  );
+  const shirtId = Number(
+    db
+      .prepare(
+        `INSERT INTO products (org_id, code, name, unit, price, min_stock, status, category_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+      )
+      .run(orgId, 'SP-SEED-01', 'Áo thun giả lập', 'cái', 150000, 5, catClothes, now, now)
+      .lastInsertRowid,
+  );
+  db.prepare(
+    `INSERT INTO products (org_id, code, name, unit, price, min_stock, status, category_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+  ).run(orgId, 'SP-SEED-02', 'Nồi cơm điện giả lập', 'cái', 850000, 2, catHome, now, now);
+  db.prepare(
+    `INSERT INTO product_variants (org_id, product_id, sku, name, barcode, price_override, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+  ).run(orgId, shirtId, 'SKU-SEED-01-M', 'Size M', '8930000000011', now, now);
+  db.prepare(
+    `INSERT INTO product_prices (org_id, product_id, variant_id, channel, branch_id, price, created_at, updated_at)
+     VALUES (?, ?, NULL, 'web', NULL, ?, ?, ?)`,
+  ).run(orgId, shirtId, 160000, now, now);
 }
 
 const isMain = process.argv[1] !== undefined && process.argv[1].endsWith('seed.ts');

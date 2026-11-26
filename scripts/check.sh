@@ -107,11 +107,87 @@ smoke() {
   echo "$audit" | grep -q '"action":"lock"' || { echo "audit log thieu lock: $audit"; return 1; }
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" "http://127.0.0.1:$port/api/orgs/9999/branches")"
   [ "$code" = "403" ] || { echo "truy cap org khac tra ve HTTP $code, mong 403"; return 1; }
+  # San pham / gia / CSV (GOAL-003): tao san pham -> bien the -> trung SKU 409
+  # -> gia rieng + fallback -> lich su gia -> preview CSV loi (khong ghi)
+  # -> import CSV loi (0 dong) -> import CSV sach -> export khop -> RBAC 403.
+  local branch2_res branch2_id prod_res prod_id var_res dup_code price_res eff_price hist
+  local wh_pass wh_res wh_cookie sales2_pass sales2_res sales2_cookie
+  local preview_file import_bad import_clean export_csv count_before count_after
+  branch2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Chi nhanh 2"}' "http://127.0.0.1:$port/api/branches")" || return 1
+  branch2_id="$(echo "$branch2_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  wh_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  wh_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-smoke@example.local\",\"password\":\"$wh_pass\",\"role\":\"warehouse\",\"branch_id\":1}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  wh_cookie="$tmpdir/wh-cookie.txt"
+  curl -fsS -c "$wh_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-smoke@example.local\",\"password\":\"$wh_pass\"}" \
+    "http://127.0.0.1:$port/login" >/dev/null || return 1
+  sales2_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  sales2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales2-smoke@example.local\",\"password\":\"$sales2_pass\",\"role\":\"sales\",\"branch_id\":1}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  sales2_cookie="$tmpdir/sales2-cookie.txt"
+  curl -fsS -c "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales2-smoke@example.local\",\"password\":\"$sales2_pass\"}" \
+    "http://127.0.0.1:$port/login" >/dev/null || return 1
+  prod_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-SMOKE","name":"San pham smoke","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  echo "$prod_res" | grep -q '"code":"SP-SMOKE"' || { echo "tao san pham tra ve: $prod_res"; return 1; }
+  prod_id="$(echo "$prod_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  var_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-SMOKE","name":"Bien the smoke"}' \
+    "http://127.0.0.1:$port/api/products/$prod_id/variants")" || return 1
+  echo "$var_res" | grep -q '"sku":"SKU-SMOKE"' || { echo "tao bien the tra ve: $var_res"; return 1; }
+  dup_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-SMOKE","name":"Trung SKU"}' \
+    "http://127.0.0.1:$port/api/products/$prod_id/variants")"
+  [ "$dup_code" = "409" ] || { echo "trung SKU tra ve HTTP $dup_code, mong 409"; return 1; }
+  price_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"channel\":\"web\",\"branch_id\":$branch2_id,\"price\":130000,\"reason\":\"gia web CN2\"}" \
+    "http://127.0.0.1:$port/api/products/$prod_id/prices")" || return 1
+  echo "$price_res" | grep -q '"price":130000' || { echo "dat gia rieng tra ve: $price_res"; return 1; }
+  eff_price="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/products/$prod_id/price?channel=web&branch_id=$branch2_id")" || return 1
+  echo "$eff_price" | grep -q '"price":130000' || { echo "gia hieu dung tra ve: $eff_price"; return 1; }
+  echo "$eff_price" | grep -q '"source":"channel_branch"' || { echo "source gia tra ve: $eff_price"; return 1; }
+  hist="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/products/$prod_id/price-history")" || return 1
+  echo "$hist" | grep -q '"new_price":130000' || { echo "lich su gia thieu dong moi: $hist"; return 1; }
+  printf 'code,name,price,unit,min_stock,status,category,barcode\nSP-PV-SMOKE,Ao smoke,100000,cai\nSP-PV-BAD,Quan loi,-5000,cai\n' > "$tmpdir/preview.csv"
+  preview_file="$(curl -fsS -b "$cookie" -F "file=@$tmpdir/preview.csv" \
+    "http://127.0.0.1:$port/api/products/import/preview")" || return 1
+  echo "$preview_file" | grep -q '"line":3' || { echo "preview CSV tra ve: $preview_file"; return 1; }
+  count_before="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")"
+  printf 'code,name,price,unit\nSP-IM-BAD1,Ao loi 1,100000,cai\nSP-IM-BAD2,Quan loi 2,-100,cai\n' > "$tmpdir/import-bad.csv"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -F "file=@$tmpdir/import-bad.csv" \
+    "http://127.0.0.1:$port/api/products/import")"
+  [ "$code" = "422" ] || { echo "import CSV loi tra ve HTTP $code, mong 422"; return 1; }
+  count_after="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")"
+  [ "$count_before" = "$count_after" ] || { echo "import loi van ghi: truoc $count_before, sau $count_after"; return 1; }
+  printf 'code,name,price,unit\nSP-IM-OK1,Ao ok 1,100000,cai\nSP-IM-OK2,Quan ok 2,200000,cai\n' > "$tmpdir/import-ok.csv"
+  import_clean="$(curl -fsS -b "$cookie" -F "file=@$tmpdir/import-ok.csv" \
+    "http://127.0.0.1:$port/api/products/import")" || return 1
+  echo "$import_clean" | grep -q '"imported":2' || { echo "import CSV sach tra ve: $import_clean"; return 1; }
+  export_csv="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/products/export")" || return 1
+  echo "$export_csv" | grep -q 'SP-SMOKE' || { echo "export CSV thieu SP-SMOKE"; return 1; }
+  echo "$export_csv" | grep -q 'SP-IM-OK1' || { echo "export CSV thieu SP-IM-OK1"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d '{"channel":"web","price":140000,"reason":"sales doi gia"}' \
+    "http://127.0.0.1:$port/api/products/$prod_id/prices")"
+  [ "$code" = "403" ] || { echo "sales doi gia tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-WH","name":"Kho tao","price":1000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")"
+  [ "$code" = "403" ] || { echo "warehouse tao san pham tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -F "file=@$tmpdir/import-ok.csv" \
+    "http://127.0.0.1:$port/api/products/import")"
+  [ "$code" = "403" ] || { echo "sales import CSV tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403)"
 }
 step "smoke server" smoke
 

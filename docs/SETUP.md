@@ -61,6 +61,23 @@ sách nhân viên `GET /api/users`, tạo chi nhánh `POST /api/branches`, nhậ
 403 (phân biệt với 401 sai mật khẩu); session cũ bị vô hiệu ngay khi khóa /
 thu hồi.
 
+## Sản phẩm, giá, CSV (GOAL-003)
+
+Sản phẩm là dữ liệu cấp org (không gắn chi nhánh); phạm vi chi nhánh chỉ
+gate giá riêng theo chi nhánh. Quy tắc giá đầy đủ: `docs/PRICING.md`
+(fallback 8 bước + trường `source`, đổi giá bắt buộc `reason`, giá trùng →
+400, lịch sử giá append-only). Ma trận quyền sản phẩm/giá/CSV:
+`docs/RBAC.md`. Endpoint chính: `POST/GET/PATCH /api/products`,
+`PATCH /api/products/:id/status` (ngừng kinh doanh/mở bán lại, không có
+DELETE), `POST/GET/PATCH /api/products/:id/variants`,
+`POST/GET/PATCH /api/categories`,
+`POST/DELETE /api/products/:id/attributes|images` (ảnh chỉ metadata),
+`POST/GET /api/products/:id/prices`, `GET /api/products/:id/price`,
+`GET /api/products/:id/price-history`,
+`POST /api/products/import/preview`, `POST /api/products/import` (atomic,
+tối đa 1000 dòng), `GET /api/products/export`. Seed tạo sẵn 2 sản phẩm mẫu
+(`SP-SEED-01`, `SP-SEED-02`) + 1 biến thể + 1 giá riêng kênh `web`.
+
 ## Chạy test
 
 ```sh
@@ -91,8 +108,9 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (7 bảng/migration, 007 là RBAC)
+- `src/db.ts` — mở DB + migration tuần tự (8 migration, 008 là sản phẩm/giá/CSV)
 - `src/rbac.ts` — helper phân quyền `can()` + ma trận vai × thao tác × phạm vi
+- `src/products.ts` — giá hiệu dụng fallback 8 bước + parse CSV (GOAL-003)
 - `src/seed.ts` — seed giả lập tối thiểu
 - `src/auth.ts` — bcrypt + session
 - `src/tenant.ts` — middleware gắn org/branch của user vào request

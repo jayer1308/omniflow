@@ -133,6 +133,99 @@ rbac_cross_scope() {
 }
 demo_step "RBAC: sales moi nhan vien bi chan 403 (sai vai)" rbac_cross_scope
 
+# San pham / gia / CSV (GOAL-003): tao san pham -> bien the -> trung SKU 409
+# -> gia rieng + fallback -> lich su gia -> preview CSV loi (khong ghi)
+# -> import CSV loi (0 dong) -> import CSV sach -> export khop -> RBAC 403.
+WH_PASS="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+WH_COOKIE="$TMPDIR_DEMO/wh-cookie.txt"
+BRANCH2_FILE="$TMPDIR_DEMO/branch2.txt"
+PROD_FILE="$TMPDIR_DEMO/prod.txt"
+
+san_pham_setup() {
+  local res
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Chi nhanh 2"}' "http://127.0.0.1:$PORT_DEMO/api/branches")"
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$BRANCH2_FILE"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-demo@example.local\",\"password\":\"$WH_PASS\",\"role\":\"warehouse\",\"branch_id\":1}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite" | grep -q '"status":"active"' || return 1
+  curl -fsS -c "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-demo@example.local\",\"password\":\"$WH_PASS\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" | grep -q '"ok":true'
+}
+demo_step "san-pham: tao chi nhanh 2, moi warehouse, dang nhap duoc" san_pham_setup
+
+san_pham_tao() {
+  local res dup
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-DEMO","name":"San pham demo","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products")"
+  echo "$res" | grep -q '"code":"SP-DEMO"' || { echo "tao san pham tra ve: $res"; return 1; }
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$PROD_FILE"
+  local id
+  id="$(cat "$PROD_FILE")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-DEMO","name":"Bien the demo"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$id/variants" | grep -q '"sku":"SKU-DEMO"' || return 1
+  dup="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-DEMO","name":"Trung SKU"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$id/variants")"
+  [ "$dup" = "409" ] || { echo "trung SKU tra ve HTTP $dup, mong 409"; return 1; }
+}
+demo_step "san-pham: tao san pham + bien the, trung SKU bi 409" san_pham_tao
+
+san_pham_gia() {
+  local id branch2 eff hist
+  id="$(cat "$PROD_FILE")"
+  branch2="$(cat "$BRANCH2_FILE")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"channel\":\"web\",\"branch_id\":$branch2,\"price\":130000,\"reason\":\"gia web CN2\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$id/prices" | grep -q '"price":130000' || return 1
+  eff="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products/$id/price?channel=web&branch_id=$branch2")"
+  echo "$eff" | grep -q '"price":130000' || { echo "gia hieu dung tra ve: $eff"; return 1; }
+  echo "$eff" | grep -q '"source":"channel_branch"' || { echo "source gia tra ve: $eff"; return 1; }
+  hist="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products/$id/price-history")"
+  echo "$hist" | grep -q '"new_price":130000' || { echo "lich su gia thieu dong moi"; return 1; }
+}
+demo_step "san-pham: dat gia rieng, fallback dung, lich su gia ghi du" san_pham_gia
+
+san_pham_csv() {
+  local before after preview import_bad import_ok export_csv
+  printf 'code,name,price,unit\nSP-CSV-PV,Ao csv,100000,cai\nSP-CSV-BAD,Quan loi,-5000,cai\n' > "$TMPDIR_DEMO/preview.csv"
+  preview="$(curl -fsS -b "$COOKIE" -F "file=@$TMPDIR_DEMO/preview.csv" \
+    "http://127.0.0.1:$PORT_DEMO/api/products/import/preview")"
+  echo "$preview" | grep -q '"line":3' || { echo "preview CSV tra ve: $preview"; return 1; }
+  before="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")"
+  printf 'code,name,price,unit\nSP-CSV-BAD1,Ao loi,100000,cai\nSP-CSV-BAD2,Quan loi,-100,cai\n' > "$TMPDIR_DEMO/import-bad.csv"
+  import_bad="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -F "file=@$TMPDIR_DEMO/import-bad.csv" \
+    "http://127.0.0.1:$PORT_DEMO/api/products/import")"
+  [ "$import_bad" = "422" ] || { echo "import CSV loi tra ve HTTP $import_bad, mong 422"; return 1; }
+  after="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")"
+  [ "$before" = "$after" ] || { echo "import loi van ghi: truoc $before, sau $after"; return 1; }
+  printf 'code,name,price,unit\nSP-CSV-OK1,Ao ok,100000,cai\nSP-CSV-OK2,Quan ok,200000,cai\n' > "$TMPDIR_DEMO/import-ok.csv"
+  import_ok="$(curl -fsS -b "$COOKIE" -F "file=@$TMPDIR_DEMO/import-ok.csv" \
+    "http://127.0.0.1:$PORT_DEMO/api/products/import")"
+  echo "$import_ok" | grep -q '"imported":2' || { echo "import CSV sach tra ve: $import_ok"; return 1; }
+  export_csv="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products/export")"
+  echo "$export_csv" | grep -q 'SP-DEMO' || { echo "export CSV thieu SP-DEMO"; return 1; }
+  echo "$export_csv" | grep -q 'SP-CSV-OK1' || { echo "export CSV thieu SP-CSV-OK1"; return 1; }
+}
+demo_step "san-pham: preview CSV loi khong ghi, import loi 422 ghi 0 dong, import sach, export khop" san_pham_csv
+
+san_pham_rbac() {
+  local id code
+  id="$(cat "$PROD_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"channel":"web","price":140000,"reason":"sales doi gia"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$id/prices")"
+  [ "$code" = "403" ] || { echo "sales doi gia tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-WH","name":"Kho tao","price":1000,"unit":"cai"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products")"
+  [ "$code" = "403" ] || { echo "warehouse tao san pham tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "san-pham: sales doi gia bi 403, warehouse tao san pham bi 403" san_pham_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \

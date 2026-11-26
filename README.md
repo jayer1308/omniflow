@@ -25,9 +25,25 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV)
 ```
+
+## Sản phẩm, giá, CSV (GOAL-003)
+
+Sản phẩm + biến thể (SKU duy nhất trong org) + danh mục/thuộc tính/ảnh
+metadata; giá chuẩn + giá riêng theo kênh (`counter`/`web`/`api`) và chi
+nhánh với fallback 8 bước + lịch sử giá append-only; import/export CSV
+(xem trước, báo lỗi từng dòng, import atomic). Xem `docs/PRICING.md` và
+`docs/RBAC.md` (ma trận sản phẩm/giá/CSV). Endpoint chính:
+`POST/GET/PATCH /api/products`, `PATCH /api/products/:id/status`,
+`POST/GET/PATCH /api/products/:id/variants`,
+`POST/GET/PATCH /api/categories`,
+`POST/DELETE /api/products/:id/attributes|images`,
+`POST/GET /api/products/:id/prices`, `GET /api/products/:id/price`,
+`GET /api/products/:id/price-history`,
+`POST /api/products/import/preview`, `POST /api/products/import`,
+`GET /api/products/export`.
 
 ## Stack
 

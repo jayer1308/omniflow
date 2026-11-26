@@ -39,7 +39,20 @@ export type Action =
   | 'change-password-other'
   | 'list-users'
   | 'view-audit-log'
-  | 'create-branch';
+  | 'create-branch'
+  // GOAL-003: sản phẩm / giá / CSV (xem docs/RBAC.md, ma trận sản phẩm).
+  | 'create-product'
+  | 'update-product'
+  | 'discontinue-product'
+  | 'manage-category'
+  | 'change-price'
+  | 'view-price-history'
+  | 'import-csv'
+  | 'export-csv'
+  // Xem giá riêng của đúng một chi nhánh (dùng cho GET /price + lọc
+  // GET /prices): owner/manager xem mọi chi nhánh, vai còn lại chỉ xem
+  // chi nhánh của mình (inScope).
+  | 'view-branch-price';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -106,6 +119,30 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       return actor.role === 'owner' || actor.role === 'manager';
     case 'create-branch':
       return actor.role === 'owner';
+    // GOAL-003: ma trận sản phẩm/giá/CSV (docs/RBAC.md). Sản phẩm là dữ
+    // liệu cấp org nên tạo/sửa sản phẩm không gate theo chi nhánh; phạm vi
+    // chi nhánh chỉ gate giá riêng (xem 'view-branch-price' ở dưới).
+    case 'create-product':
+    case 'update-product':
+      return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'sales';
+    case 'discontinue-product':
+    case 'manage-category':
+    case 'change-price':
+    case 'import-csv':
+      return actor.role === 'owner' || actor.role === 'manager';
+    case 'view-price-history':
+      return (
+        actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant'
+      );
+    case 'export-csv':
+      return true;
+    case 'view-branch-price':
+      // Owner/manager xem giá riêng mọi chi nhánh; vai còn lại chỉ xem giá
+      // của đúng chi nhánh của mình. target.branchId NULL = giá áp cho mọi
+      // chi nhánh thì ai cũng xem được.
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (targetBranch === null) return true;
+      return inScope(actor.branchId, targetBranch);
     default:
       return false;
   }

@@ -41,6 +41,62 @@ kiểm chứng ở mức helper `can()`, chưa có endpoint nghiệp vụ kho.
 | Tạo chi nhánh (`POST /api/branches`) | Được, trong org của mình | Không (403) | Không (403) |
 | Nghiệp vụ bán hàng / kho / kế toán | — | — | CHỈ LÀ ĐỊNH HƯỚNG cho GOAL-003/004/005/006: `sales` tạo đơn, `warehouse` nhập/xuất kho, `accountant` xem thanh toán/báo cáo. GOAL-002 KHÔNG làm endpoint nghiệp vụ nên KHÔNG test các ô này qua HTTP |
 
+## Ma trận quyền sản phẩm/giá/CSV (GOAL-003)
+
+Sản phẩm là dữ liệu **cấp org** (D15): bảng `products` có `org_id`, KHÔNG
+có `branch_id` — một sản phẩm bán ở mọi chi nhánh trong org. Phạm vi chi
+nhánh chỉ gate **giá riêng theo chi nhánh** (xem dưới). Các thao tác còn lại
+gate theo org. Helper `can()` mở rộng 8 actions: `create-product`,
+`update-product`, `discontinue-product`, `manage-category`, `change-price`,
+`view-price-history`, `import-csv`, `export-csv` (+ `view-branch-price`
+nội bộ cho việc xem giá riêng từng chi nhánh).
+
+| Thao tác | owner | manager | sales | warehouse / accountant |
+|---|---|---|---|---|
+| Xem/tìm/lọc sản phẩm, biến thể, danh mục (`GET /api/products...`) | Được, toàn org | Được, toàn org | Được, toàn org | Được, toàn org |
+| Tạo/sửa sản phẩm, biến thể, thuộc tính, ảnh metadata (`POST/PATCH /api/products...`) | Được | Được | Được | Không (403) |
+| Ngừng kinh doanh / mở bán lại (`PATCH /api/products/:id/status`) | Được | Được | Không (403) | Không (403) |
+| Tạo/sửa danh mục (`POST/PATCH /api/categories...`) | Được | Được | Không (403) | Không (403) |
+| Đổi giá (chuẩn, riêng theo kênh/chi nhánh, override biến thể) | Được | Được | Không (403) | Không (403) |
+| Xem giá riêng theo chi nhánh | Được, mọi chi nhánh | Được, mọi chi nhánh | Được, chỉ chi nhánh của mình | Được, chỉ chi nhánh của mình (`accountant` xem để đối soát; `warehouse` xem để biết giá xuất) |
+| Xem lịch sử giá (`GET /api/products/:id/price-history`) | Được | Được | Không (403) | Chỉ `accountant` được; `warehouse` không (403) |
+| Xem trước CSV (`POST /api/products/import/preview`) | Được | Được | Không (403) | Không (403) |
+| Nhập CSV (`POST /api/products/import`) | Được | Được | Không (403) | Không (403) |
+| Xuất CSV (`GET /api/products/export`) | Được | Được | Được | Được |
+| Xem audit log sản phẩm/giá/CSV | Theo luật xem log GOAL-002 (`owner` toàn org, `manager` trong phạm vi; các vai khác → 403) | — | — | — |
+
+### Mô hình phạm vi giá theo chi nhánh
+
+- Giá riêng có `branch_id` NULL áp cho mọi chi nhánh: ai cũng xem được.
+- Giá riêng có `branch_id` cụ thể: `owner`/`manager` xem được mọi chi
+  nhánh (kể cả khi `users.branch_id` của họ trỏ một chi nhánh — vai chủ/quản
+  lý không bị giới hạn chi nhánh khi xem giá); `sales`/`warehouse`/
+  `accountant` có `branch_id` chỉ xem được giá đúng chi nhánh của mình —
+  hỏi giá chi nhánh khác (`GET /api/products/:id/price?branch_id=...`) →
+  **403**, và `GET /api/products/:id/prices` tự lọc bỏ giá chi nhánh khác.
+- Đổi giá riêng theo chi nhánh (owner/manager) không bị giới hạn chi nhánh:
+  quản lý đặt được giá mọi chi nhánh trong org.
+
+### Endpoints mới (GOAL-003)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/products`, `PATCH /api/products/:id` | owner / manager / sales |
+| `GET /api/products`, `GET /api/products/:id` | mọi vai (lọc theo org) |
+| `PATCH /api/products/:id/status` | owner / manager |
+| `POST /api/products/:id/variants`, `GET /api/products/:id/variants`, `PATCH /api/products/:id/variants/:variantId` | tạo/sửa: owner / manager / sales; xem: mọi vai |
+| `POST /api/categories`, `GET /api/categories`, `PATCH /api/categories/:id` | tạo/sửa: owner / manager; xem: mọi vai |
+| `POST /api/products/:id/attributes`, `DELETE /api/products/:id/attributes/:attrId` | owner / manager / sales |
+| `POST /api/products/:id/images`, `DELETE /api/products/:id/images/:imageId` | owner / manager / sales (chỉ metadata `url` + `alt_text`, không upload file) |
+| `POST /api/products/:id/prices`, `GET /api/products/:id/prices`, `GET /api/products/:id/price` | đổi giá: owner / manager; xem: mọi vai (giá riêng lọc theo chi nhánh) |
+| `GET /api/products/:id/price-history` | owner / manager / accountant |
+| `POST /api/products/import/preview`, `POST /api/products/import` | owner / manager |
+| `GET /api/products/export` | mọi vai |
+
+Audit log: mọi thao tác tạo/sửa sản phẩm, tạo/sửa biến thể, tạo/sửa danh
+mục, ngừng kinh doanh/mở bán lại, đổi giá, nhập CSV đều ghi `audit_log`
+(`action` + `detail` JSON với `target_product_id` và `before`/`after`).
+
 ## Tài khoản bị khóa / thu hồi
 
 - `POST /login` với tài khoản bị khóa → **403** `{"error":"Tài khoản đang bị khóa","code":"account_locked"}`, phân biệt với sai mật khẩu → **401**.
