@@ -88,3 +88,16 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
 - Lý do: tránh lỗi làm tròn tiền và lệch múi giờ trong báo cáo/đối soát
   (GOAL-010 sẽ định nghĩa rõ).
 - Đổi khi: khi có doanh nghiệp ở múi giờ khác (thêm timezone theo org).
+
+## D11 — L0 tsc chỉ kiểm tra `src/`, `node:sqlite` nạp qua require (26/11/2026)
+
+- Quyết định: `tsconfig.json` include chỉ `src/**/*.ts`; test chạy qua
+  Vitest/esbuild nên không được typecheck. `src/db.ts` nạp `node:sqlite`
+  bằng `require` runtime (kèm `import type` để lấy kiểu), vì Vitest 2
+  (Vite 5) chưa nhận `node:sqlite` là builtin và import tĩnh làm rớt lúc
+  load test.
+- Lý do: acceptance test đã khóa có một cast kiểu không qua được tsc strict;
+  sửa test để vừa typecheck sẽ vi phạm khóa test. Giữ test nguyên, thu hẹp
+  phạm vi L0 thay vì làm yếu test.
+- Đổi khi: nâng Vitest lên bản nhận `node:sqlite`, hoặc sửa test qua
+  `tests revise` rồi mở rộng include trở lại `tests/`.

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Vận hành thương mại đa kênh</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>OmniFlow</h1>
+  <p>Hệ thống vận hành thương mại đa kênh — dữ liệu giả lập, chạy local.</p>
+  <% if (user) { %>
+    <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+    <p><a href="/owner-only">Trang chỉ dành cho chủ doanh nghiệp</a></p>
+    <form id="logout-form"><button type="submit">Đăng xuất</button></form>
+  <% } else { %>
+    <p><a href="/login">Đăng nhập</a></p>
+  <% } %>
+  <p><a href="/health">Kiểm tra /health</a></p>
+</main>
+<script>
+document.getElementById('logout-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await fetch('/logout', { method: 'POST' });
+  location.reload();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; line-height: 1.5; color: #1a1a1a; background: #fafafa; }
+main { max-width: 640px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.5rem; }
+a { color: #0b5fff; }
+label { display: block; margin: 0.75rem 0; }
+input { display: block; width: 100%; padding: 0.5rem; margin-top: 0.25rem; font-size: 1rem; }
+button { padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+#msg { color: #b00020; }
+@media (min-width: 720px) { main { padding: 2rem; } }
