@@ -241,6 +241,51 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );`,
   },
+  {
+    // GOAL-005: đơn hàng đa kênh + vòng đời. orders cấp org (branch_id +
+    // warehouse_id NOT NULL, code DH-YYYYMMDD-NNNN UNIQUE trong org,
+    // channel counter/web/api, status state machine, total nguyên đồng);
+    // order_items snapshot giá tại thời điểm đặt (UNIQUE đơn/biến thể);
+    // order_events append-only (from_status NULL khi tạo đơn).
+    version: 10,
+    sql: `CREATE TABLE IF NOT EXISTS orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+      code TEXT NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('counter', 'web', 'api')),
+      customer_name TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed', 'processing', 'completed', 'cancelled')),
+      total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0),
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (org_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      variant_id INTEGER NOT NULL REFERENCES product_variants(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      sku TEXT NOT NULL,
+      name TEXT NOT NULL,
+      unit_price INTEGER NOT NULL CHECK (unit_price >= 0),
+      price_source TEXT NOT NULL,
+      qty INTEGER NOT NULL CHECK (qty > 0),
+      line_total INTEGER NOT NULL CHECK (line_total >= 0),
+      UNIQUE (order_id, variant_id)
+    );
+    CREATE TABLE IF NOT EXISTS order_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      actor_id INTEGER NOT NULL REFERENCES users(id),
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

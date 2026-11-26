@@ -25,9 +25,26 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng)
 ```
+
+## Đơn hàng đa kênh + vòng đời (GOAL-005)
+
+Tạo đơn tại quầy + qua API (kênh `counter`/`web`/`api`), mỗi dòng snapshot
+giá bán tại thời điểm đặt (không đổi khi giá đổi sau đó); vòng đời
+`draft → confirmed → processing → completed / cancelled` (chuyển sai → 400);
+xác nhận giữ hàng nguyên tử, hủy giải phóng đúng số đã giữ, hoàn tất =
+giải phóng giữ + xuất kho trong cùng một transaction (release + out, không
+thêm loại movement mới); mã đơn `DH-YYYYMMDD-NNNN` duy nhất trong org;
+idempotency (`order:create:<key>` / `order:<hành động>:<key>`, gửi lại trả
+`replayed: true`) + chống bán quá tồn trong transaction `BEGIN IMMEDIATE`;
+tìm kiếm/lọc/phân trang + lịch sử đơn append-only (`order_events`, cũ nhất
+trước); RBAC đơn theo vai + phạm vi chi nhánh/kho; audit log mọi thao tác.
+Xem `docs/RBAC.md` (ma trận đơn) và `docs/DECISIONS.md` (D19, D20).
+Endpoint chính: `POST /api/orders`, `GET /api/orders`, `GET /api/orders/:id`,
+`POST /api/orders/:id/confirm|process|complete|cancel` (không có DELETE đơn,
+không có API sửa/xóa lịch sử đơn).
 
 ## Kho đa kho + tồn giữ/có thể bán (GOAL-004)
 

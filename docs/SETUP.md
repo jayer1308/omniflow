@@ -78,6 +78,27 @@ DELETE), `POST/GET/PATCH /api/products/:id/variants`,
 tối đa 1000 dòng), `GET /api/products/export`. Seed tạo sẵn 2 sản phẩm mẫu
 (`SP-SEED-01`, `SP-SEED-02`) + 1 biến thể + 1 giá riêng kênh `web`.
 
+## Đơn hàng đa kênh + vòng đời (GOAL-005)
+
+Đơn là dữ liệu cấp org, có chi nhánh + kho xuất hàng bắt buộc; mã đơn
+`DH-YYYYMMDD-NNNN` duy nhất trong org; giá dòng snapshot tại thời điểm đặt
+bằng giá hiệu dụng GOAL-003 (fallback 8 bước, hàm dùng chung
+`resolveEffectivePrice()` — D20); vòng đời `draft → confirmed → processing
+→ completed / cancelled`, chuyển sai → 400; xác nhận giữ hàng nguyên tử,
+hủy giải phóng đúng số đã giữ, hoàn tất = release + out trong cùng một
+transaction (D19); lịch sử đơn append-only (`order_events`, cũ nhất trước).
+Ma trận quyền đơn đầy đủ: `docs/RBAC.md`; quyết định mô hình:
+`docs/DECISIONS.md` (D19, D20). Endpoint chính:
+`POST /api/orders` (201, trả đơn kèm `items` đã snapshot + `total` do server
+tính), `GET /api/orders` (`status`/`channel`/`code`/`customer_name`/
+`branch_id`/`warehouse_id`, `limit` mặc định 20 tối đa 100, `offset` mặc
+định 0, kèm `total`), `GET /api/orders/:id` (kèm `items` + `events`),
+`POST /api/orders/:id/confirm|process|complete|cancel` (nhận `{note?,
+idempotency_key?}`; không có DELETE đơn, không có API sửa/xóa lịch sử).
+Idempotency: header `Idempotency-Key` hoặc `idempotency_key` trong body,
+tên miền `order:create:<key>` / `order:<hành động>:<key>`, gửi lại trả
+`replayed: true`.
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
@@ -124,7 +145,10 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (8 migration, 008 là sản phẩm/giá/CSV)
+- `src/db.ts` — mở DB + migration tuần tự (10 migration, 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng)
+- `src/orders.ts` — đơn hàng: state machine, mã đơn, service tạo/chuyển
+  trạng thái (giữ/giải phóng/xuất kho qua `applyMovement`, idempotency
+  trong transaction)
 - `src/rbac.ts` — helper phân quyền `can()` + ma trận vai × thao tác × phạm vi
 - `src/products.ts` — giá hiệu dụng fallback 8 bước + parse CSV (GOAL-003)
 - `src/seed.ts` — seed giả lập tối thiểu

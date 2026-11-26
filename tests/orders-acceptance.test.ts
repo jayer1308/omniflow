@@ -1376,10 +1376,15 @@ test('AC-4 audit log don: tao/xac nhan/xu ly/hoan tat/huy deu ghi audit voi acto
     expect(row?.detail.order_code).toBeDefined();
     expect(typeof row?.detail.total).toBe('number');
   }
-  expect(byAction.get('create-order')?.detail.target_order_id).toBe(order1.id);
-  expect(byAction.get('create-order')?.detail.order_code).toBe(order1.code);
-  expect(byAction.get('create-order')?.detail.total).toBe(200000);
-  expect(byAction.get('create-order')?.detail.to_status).toBe('draft');
+  // create-order co 2 ban ghi (order1 + order2); Map theo action chi giu ban cuoi
+  // nen tim dung ban ghi cua order1 theo target_order_id.
+  const createOrder1 = rows.find(
+    (r) => r.action === 'create-order' && r.detail.target_order_id === order1.id,
+  );
+  expect(createOrder1?.detail.target_order_id).toBe(order1.id);
+  expect(createOrder1?.detail.order_code).toBe(order1.code);
+  expect(createOrder1?.detail.total).toBe(200000);
+  expect(createOrder1?.detail.to_status).toBe('draft');
   expect(byAction.get('confirm-order')?.detail.from_status).toBe('draft');
   expect(byAction.get('confirm-order')?.detail.to_status).toBe('confirmed');
   expect(byAction.get('complete-order')?.detail.from_status).toBe('processing');

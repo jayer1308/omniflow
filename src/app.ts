@@ -13,7 +13,14 @@ import {
 } from './auth.js';
 import type { SessionUser } from './auth.js';
 import { withIdempotency } from './idempotency.js';
-import { effectivePrice, isAllowedChannel, parseProductCsvWithLines } from './products.js';
+import {
+  createOrderTx,
+  getOrderDetail,
+  listOrders,
+  transitionOrderTx,
+  type OrderAction,
+} from './orders.js';
+import { isAllowedChannel, parseProductCsvWithLines, resolveEffectivePrice } from './products.js';
 import { can, ROLES, type Role } from './rbac.js';
 import {
   applyMovement,
@@ -1290,31 +1297,15 @@ export function createApp(db: DatabaseSync): Express {
         return;
       }
     }
-    const rows = db
-      .prepare('SELECT * FROM product_prices WHERE product_id = ?')
-      .all(product.id) as unknown as PriceRow[];
-    const findPrice = (
-      wantVariant: number | null,
-      wantChannel: string | null,
-      wantBranch: number | null,
-    ): number | null => {
-      const row = rows.find(
-        (r) =>
-          (r.variant_id ?? null) === wantVariant &&
-          (r.channel ?? null) === wantChannel &&
-          (r.branch_id ?? null) === wantBranch,
-      );
-      return row ? row.price : null;
-    };
-    const result = effectivePrice({
+    // Gia hieu dung qua ham resolve dung chung (D20): route gia va luong
+    // tao don (snapshot gia) cung dung resolveEffectivePrice().
+    const result = resolveEffectivePrice(db, {
+      productId: product.id,
       basePrice: product.price,
+      variantId,
       variantOverride: variant?.price_override ?? null,
-      variantChannelBranch: variantId === null ? null : findPrice(variantId, channel, branchId),
-      variantChannel: variantId === null ? null : findPrice(variantId, channel, null),
-      variantBranch: variantId === null ? null : findPrice(variantId, null, branchId),
-      productChannelBranch: findPrice(null, channel, branchId),
-      productChannel: findPrice(null, channel, null),
-      productBranch: findPrice(null, null, branchId),
+      channel,
+      branchId,
     });
     res.json({
       product_id: product.id,
@@ -2886,24 +2877,121 @@ export function createApp(db: DatabaseSync): Express {
     res.json(queryLevels(actor, scope, null, true, 1000, 0));
   });
 
-  // ---------- Don hang da kenh (GOAL-005) — STUB cho Tester ----------
-  // Worker thay bang logic that: hien tai moi endpoint don tra 501
-  // "not implemented" de test acceptance DO dung ly do. Ca route DELETE
-  // don / sua-xoa lich su don cung la stub 501 (khong phai 404) de test
-  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
-  const orderNotImplemented = (_req: TenantRequest, res: Response): void => {
-    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
-  };
-  app.post('/api/orders', orderNotImplemented);
-  app.get('/api/orders', orderNotImplemented);
-  app.get('/api/orders/:id', orderNotImplemented);
-  app.delete('/api/orders/:id', orderNotImplemented);
-  app.post('/api/orders/:id/confirm', orderNotImplemented);
-  app.post('/api/orders/:id/process', orderNotImplemented);
-  app.post('/api/orders/:id/complete', orderNotImplemented);
-  app.post('/api/orders/:id/cancel', orderNotImplemented);
-  app.patch('/api/orders/:id/events/:eventId', orderNotImplemented);
-  app.delete('/api/orders/:id/events/:eventId', orderNotImplemented);
+  // ---------- Don hang da kenh (GOAL-005) ----------
+  // Khong co endpoint DELETE don (chi huy bang trang thai, giu lich su)
+  // va khong co API sua/xoa order_events (append-only) — goi cac route do
+  // tra 404 mac dinh cua Express. Tao don + chuyen trang thai dung
+  // withStockIdempotency qua runStockOp (ten mien order:create:<key> /
+  // order:<hanh dong>:<key>); gui lai tra response cu kem replayed: true.
+
+  /** Key idempotency cho don, tu header hoac body (thieu key van chay). */
+  function orderKey(req: TenantRequest, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = (req.body ?? {}) as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `order:${op}:${raw}`;
+  }
+
+  /** Map loi nghiep vu don (xem src/orders.ts) sang HTTP. */
+  function orderFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('insufficient_stock')) {
+      res.status(400).json({ error: msg, code: 'insufficient_stock' });
+      return;
+    }
+    if (msg.startsWith('invalid_stock')) {
+      res.status(400).json({ error: msg, code: 'invalid_stock' });
+      return;
+    }
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý đơn hàng' });
+  }
+
+  app.post('/api/orders', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const body = (req.body ?? {}) as {
+      branch_id?: unknown;
+      warehouse_id?: unknown;
+      channel?: unknown;
+      customer_name?: unknown;
+      items?: unknown;
+    };
+    try {
+      const outcome = runStockOp(actor, orderKey(req, 'create'), () =>
+        createOrderTx(db, actor, body),
+      );
+      if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+      else res.status(201).json(outcome.result);
+    } catch (err) {
+      orderFail(res, err);
+    }
+  });
+
+  app.get('/api/orders', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      const { orders, total } = listOrders(db, actor, req.query);
+      res.json({ orders, total });
+    } catch (err) {
+      orderFail(res, err);
+    }
+  });
+
+  app.get('/api/orders/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = Number(req.params.id);
+    if (!Number.isInteger(orderId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    try {
+      res.json(getOrderDetail(db, actor, orderId));
+    } catch (err) {
+      orderFail(res, err);
+    }
+  });
+
+  function orderTransition(action: OrderAction) {
+    return (req: TenantRequest, res: Response): void => {
+      const actor = req.user as SessionUser;
+      const orderId = Number(req.params.id);
+      if (!Number.isInteger(orderId)) {
+        res.status(400).json({ error: 'id không hợp lệ' });
+        return;
+      }
+      const body = (req.body ?? {}) as { note?: unknown };
+      const note = typeof body.note === 'string' ? body.note : null;
+      try {
+        const outcome = runStockOp(actor, orderKey(req, action), () =>
+          transitionOrderTx(db, actor, orderId, action, note),
+        );
+        if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+        else res.json(outcome.result);
+      } catch (err) {
+        orderFail(res, err);
+      }
+    };
+  }
+
+  app.post('/api/orders/:id/confirm', requireAuth, orderTransition('confirm'));
+  app.post('/api/orders/:id/process', requireAuth, orderTransition('process'));
+  app.post('/api/orders/:id/complete', requireAuth, orderTransition('complete'));
+  app.post('/api/orders/:id/cancel', requireAuth, orderTransition('cancel'));
 
   return app;
 }
