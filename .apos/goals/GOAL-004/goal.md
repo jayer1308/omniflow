@@ -1,6 +1,6 @@
 # GOAL-004 v1: OmniFlow kho da kho + ton giu/co the ban: nhieu kho trong org (CRUD, khong xoa cung); nhap/xuat/dieu chinh/kiem ke/chuyen kho nguyen tu; ton thuc te / ton giu / ton co the ban (available = on-hand - reserved); lich su bien dong append-only; canh bao ton thap theo min_stock; idempotency + chong race trong transaction; chinh sach khong ton am; RBAC kho theo vai + pham vi kho + audit log; check/demo mo rong buoc kho van xanh
 
-Status: testing
+Status: verified
 
 ```json
 {
