@@ -334,3 +334,33 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   (đổi giá sau không đổi giá đơn) kiểm chứng cả hai qua cùng một hàm.
 - Đổi khi: giá cần thêm nguồn mới ngoài 8 bước (sửa `effectivePrice()` +
   `resolveEffectivePrice()` cùng lúc, một chỗ duy nhất).
+
+## D21 — Adopt R-19 mồ côi của GOAL-004 vào GOAL-005A (27/11/2026)
+
+- Ghi chú (GOAL-005A, goal bookkeeping ngoài 12 goal chính, không quyết
+  định kiến trúc mới): yêu cầu R-19 của GOAL-004 (3 luồng giữ hàng tự
+  động theo vòng đời đơn) đã được GOAL-005 implement đầy đủ nhưng
+  goal-005.json không khai `adopts` chính thức nên APOS báo mồ côi
+  (orphan-requirement). GOAL-005A nhận R-19 từ source `brief-004.md`
+  (sha256 `a83e40111118d17ac74d1e1049134daca6958f7e46aa5126a7cf8b22f3884579`)
+  và kiểm chứng lại bằng 10 test khóa mới
+  (`tests/orders-005a-acceptance.test.ts`, proof `stays-green`) trên code
+  GOAL-005 đã có.
+- Xác nhận 3 luồng đã có từ GOAL-005, không sửa code nghiệp vụ trong goal
+  này: xác nhận đơn tự động giữ hàng nguyên tử mọi dòng trong 1
+  transaction (`src/orders.ts` `transitionOrderTx` + `src/stock.ts`
+  `applyMovement`; thiếu tồn → 400 `insufficient_stock`, không giữ dòng
+  nào, đơn ở lại draft); hủy đơn từ confirmed/processing tự động giải
+  phóng đúng số đã giữ; hoàn tất đơn = release + out trong CÙNG MỘT
+  transaction (không thêm loại movement mới, D19). Tạo đơn vẫn ở draft,
+  không giữ hàng.
+- Bài học quy trình (GOAL-005A): sau `goal revise`, proposal cũ bị xóa
+  nên phải `lead propose` lại + `lead commit` lại trước khi
+  `tests submit`; proposal nộp lại phải tăng `version` (không chỉ
+  `goalVersion`). `tests submit` chỉ nhận full commit sha. Test L2 chỉ
+  được import các module trong `stubPaths` của proposal — test dùng
+  `src/auth.ts`/`src/db.ts`/`src/seed.ts` để dựng app thì phải khai cả 3
+  vào `stubPaths` (theo mẫu GOAL-005), và commit nộp test phải chứa đúng
+  bản `.apos` mới nhất (file `.apos` cũ trong cây commit sẽ bị chặn bởi
+  guard protected-file).
+- Đổi khi: không áp dụng — goal bookkeeping đã đóng khi inbox sạch.
