@@ -19,7 +19,8 @@ interface Migration {
 /**
  * Migration chạy tuần tự theo version. Mỗi migration tạo một bảng; thứ tự
  * 001 orgs -> 002 branches -> 003 users -> 004 sessions -> 005 audit_log
- * -> 006 idempotency_keys. Đã áp dụng thì bỏ qua (ghi trong schema_migrations).
+ * -> 006 idempotency_keys -> 007 users RBAC (5 vai, status, branch nullable,
+ * warehouse_id chuẩn bị; rebuild bảng, remap staff -> sales).
  * created_at có DEFAULT để insert tối thiểu (chỉ nêu khóa chính) vẫn hợp lệ.
  * idempotency_keys không FK tới orgs: helper idempotency phải dùng được ngay
  * cả khi org chưa được tạo trong cùng giao dịch seed/test.
@@ -84,6 +85,32 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (org_id, key)
     )`,
+  },
+  {
+    // GOAL-002: 5 vai, status 3 giá trị, branch_id nullable, warehouse_id
+    // chuẩn bị (không FK — bảng warehouses là GOAL-004). SQLite không sửa
+    // CHECK bằng ALTER nên rebuild bảng: tạo mới -> copy (staff -> sales)
+    // -> đổi tên. Tắt FK trong lúc rebuild vì sessions/audit_log FK tới
+    // users; bật lại ngay sau đó.
+    version: 7,
+    sql: `PRAGMA foreign_keys = OFF;
+    CREATE TABLE users_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      branch_id INTEGER REFERENCES branches(id),
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'sales', 'warehouse', 'accountant')),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'locked', 'revoked')),
+      warehouse_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO users_new (id, org_id, branch_id, email, password_hash, role, status, created_at)
+      SELECT id, org_id, branch_id, email, password_hash,
+        CASE WHEN role = 'staff' THEN 'sales' ELSE role END, 'active', created_at FROM users;
+    DROP TABLE users;
+    ALTER TABLE users_new RENAME TO users;
+    PRAGMA foreign_keys = ON;`,
   },
 ];
 

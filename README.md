@@ -25,8 +25,8 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra
-./scripts/demo.sh   # CHK-2: demo từng bước
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC)
 ```
 
 ## Stack

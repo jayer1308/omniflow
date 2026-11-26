@@ -1,13 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import bcrypt from 'bcrypt';
+import type { Role, UserStatus } from './rbac.js';
 
 export interface SessionUser {
   id: number;
   email: string;
-  role: string;
+  role: Role;
   orgId: number;
-  branchId: number;
+  branchId: number | null;
+  status: UserStatus;
 }
 
 /** Session sống 24 giờ (tính bằng giây). */
@@ -34,17 +36,40 @@ export function lookupSession(db: DatabaseSync, token: string): SessionUser | nu
   const row = db
     .prepare(
       `SELECT s.expires_at AS expiresAt, u.id AS id, u.email AS email, u.role AS role,
-              u.org_id AS orgId, u.branch_id AS branchId
+              u.org_id AS orgId, u.branch_id AS branchId, u.status AS status
        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
     )
     .get(token) as
-    | { expiresAt: number; id: number; email: string; role: string; orgId: number; branchId: number }
+    | {
+        expiresAt: number;
+        id: number;
+        email: string;
+        role: Role;
+        orgId: number;
+        branchId: number | null;
+        status: UserStatus;
+      }
     | undefined;
   if (!row) return null;
   if (row.expiresAt <= Math.floor(Date.now() / 1000)) return null;
-  return { id: row.id, email: row.email, role: row.role, orgId: row.orgId, branchId: row.branchId };
+  // GOAL-002: chỉ user đang active mới có session hợp lệ — session lọt qua
+  // (chưa bị xóa khi khóa) vẫn bị chặn tại đây.
+  if (row.status !== 'active') return null;
+  return {
+    id: row.id,
+    email: row.email,
+    role: row.role,
+    orgId: row.orgId,
+    branchId: row.branchId,
+    status: row.status,
+  };
 }
 
 export function destroySession(db: DatabaseSync, token: string): void {
   db.prepare('DELETE FROM sessions WHERE id = ?').run(token);
+}
+
+/** Vô hiệu NGAY mọi session của một user (dùng khi khóa/thu hồi). */
+export function destroySessionsForUser(db: DatabaseSync, userId: number): void {
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
 }

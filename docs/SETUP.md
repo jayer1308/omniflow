@@ -27,8 +27,8 @@ Mở http://localhost:3000/health — phải trả `{"status":"ok"}`.
 
 ### Tài khoản seed (giả lập)
 
-- Chủ doanh nghiệp: `owner@example.local`
-- Nhân viên: `staff@example.local`
+- Chủ doanh nghiệp: `owner@example.local` (vai `owner`)
+- Nhân viên: `staff@example.local` (vai `sales` từ GOAL-002)
 
 Mật khẩu **không commit trong repo**. Cách cấp mật khẩu seed:
 
@@ -46,6 +46,20 @@ ngay, vì không xem lại được. Biến môi trường khác:
 | --- | --- | --- |
 | `OMNIFLOW_DB` | `data/omniflow.db` | Đường dẫn file SQLite |
 | `PORT` | `3000` | Port server lắng nghe |
+
+## Phân quyền (RBAC, GOAL-002)
+
+5 vai: `owner` / `manager` / `sales` / `warehouse` / `accountant`. Ma trận
+quyền đầy đủ: `docs/RBAC.md`. Endpoint chính: mời nhân viên
+`POST /api/users/invite`, khóa/mở khóa/thu hồi
+`POST /api/users/:id/lock|unlock|revoke`, đổi vai/phạm vi
+`PATCH /api/users/:id/role|scope`, đổi mật khẩu
+`POST /api/users/:id/change-password` (người khác) và
+`POST /api/users/change-password` (của mình, cần mật khẩu hiện tại), danh
+sách nhân viên `GET /api/users`, tạo chi nhánh `POST /api/branches`, nhật ký
+`GET /api/audit-log` và trang `/audit-log`. Tài khoản bị khóa đăng nhập trả
+403 (phân biệt với 401 sai mật khẩu); session cũ bị vô hiệu ngay khi khóa /
+thu hồi.
 
 ## Chạy test
 
@@ -77,7 +91,8 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (6 bảng)
+- `src/db.ts` — mở DB + migration tuần tự (7 bảng/migration, 007 là RBAC)
+- `src/rbac.ts` — helper phân quyền `can()` + ma trận vai × thao tác × phạm vi
 - `src/seed.ts` — seed giả lập tối thiểu
 - `src/auth.ts` — bcrypt + session
 - `src/tenant.ts` — middleware gắn org/branch của user vào request

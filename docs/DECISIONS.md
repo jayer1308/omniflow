@@ -112,3 +112,33 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   layer chạy sau đó fail "Cannot find package" dù check tự PASS. Đã file
   Kaiser1308/APOS#78.
 - Đổi khi: APOS sửa `prepareDependencies` (copy thay vì link, hoặc bảo vệ link).
+
+## D13 — Mô hình phạm vi: branch_id nullable + warehouse_id chuẩn bị (26/11/2026)
+
+- Quyết định: phạm vi user = `users.branch_id` nullable + `users.warehouse_id`
+  nullable, KHÔNG thêm bảng `user_scopes`. `branch_id NULL` = toàn bộ chi
+  nhánh trong org; có giá trị = đúng 1 chi nhánh đó. `warehouse_id` chỉ là
+  trường chuẩn bị (INTEGER NULL, không FK — bảng `warehouses` là GOAL-004),
+  không kiểm tra tồn tại kho thật, không có nghiệp vụ kho trong GOAL-002.
+- Lý do: phương án đơn giản nhất — không thêm bảng, không thêm join; helper
+  `can()` kiểm tra phạm vi bằng một phép so sánh. Giới hạn: 1 user không được
+  cấp 2 chi nhánh trở lên trong GOAL-002; phạm vi kho chỉ kiểm chứng ở mức
+  helper `can()`, chưa có endpoint nghiệp vụ kho để test qua HTTP.
+- Đổi khi: cần đa chi nhánh cho 1 user (Goal riêng thêm bảng `user_scopes`),
+  hoặc GOAL-004 tạo bảng `warehouses` (lúc đó gắn FK + kiểm tra tồn tại cho
+  `warehouse_id`).
+
+## D14 — Email duy nhất toàn hệ thống, status 3 giá trị, remap staff → sales (26/11/2026)
+
+- Quyết định: giữ `UNIQUE` trên `users.email` toàn hệ thống (không đổi thành
+  duy nhất trong org); `users.status` có 3 giá trị `('active','locked','revoked')`,
+  mặc định `'active'` — khóa là tạm thời (mở lại được), thu hồi là cuối cùng
+  (không có API mở lại, muốn vào lại phải mời mới), không DELETE row khi thu
+  hồi để giữ lịch sử `audit_log`; migration 007 remap mọi row `staff` cũ
+  thành `sales`, seed đổi user nhân viên thành vai `sales` (giữ email
+  `staff@example.local` và 2 user để test khóa vẫn xanh).
+- Lý do: email duy nhất toàn hệ thống khớp login bằng email hiện tại, tránh
+  một email thuộc 2 org gây nhầm lẫn khi đăng nhập; trạng thái thứ ba là cần
+  thiết vì khóa và thu hồi khác nhau về tính cuối cùng; giữ row khi thu hồi
+  vì `audit_log.user_id` FK tới `users`, xóa row sẽ vỡ FK.
+- Đổi khi: không — nguyên tắc mô hình user của GOAL-002.

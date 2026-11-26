@@ -82,6 +82,57 @@ cross_org_blocked() {
 }
 demo_step "truy cap org khac bi chan 403" cross_org_blocked
 
+# RBAC (GOAL-002): moi -> dang nhap vai moi -> khoa -> session cu bi chan -> audit log -> 403 ngoai pham vi.
+INVITE_PASS="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+RBAC_COOKIE="$TMPDIR_DEMO/rbac-cookie.txt"
+RBAC_ID_FILE="$TMPDIR_DEMO/rbac-id.txt"
+
+rbac_invite_login() {
+  local res
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-demo@example.local\",\"password\":\"$INVITE_PASS\",\"role\":\"sales\",\"branch_id\":1}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite")"
+  echo "$res" | grep -q '"status":"active"' || { echo "invite tra ve: $res"; return 1; }
+  echo "$res" | grep -q "$INVITE_PASS" && { echo "invite tra ve mat khau!"; return 1; }
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))" > "$RBAC_ID_FILE"
+  curl -fsS -c "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-demo@example.local\",\"password\":\"$INVITE_PASS\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" | grep -q '"ok":true'
+}
+demo_step "RBAC: owner moi sales moi, dang nhap duoc bang mat khau ban dau" rbac_invite_login
+
+rbac_lock_old_session() {
+  local id lock_res
+  id="$(cat "$RBAC_ID_FILE")"
+  lock_res="$(curl -fsS -X POST -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/users/$id/lock")"
+  echo "$lock_res" | grep -q '"status":"locked"' || { echo "lock tra ve: $lock_res"; return 1; }
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" "http://127.0.0.1:$PORT_DEMO/me")" = "401" ] || return 1
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-demo@example.local\",\"password\":\"$INVITE_PASS\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login")" = "403" ] || return 1
+  curl -fsS -X POST -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/users/$id/unlock" | grep -q '"status":"active"'
+}
+demo_step "RBAC: khoa xong session cu bi chan 401, dang nhap lai bi 403, mo khoa duoc" rbac_lock_old_session
+
+rbac_audit_log() {
+  local log
+  log="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/audit-log")"
+  echo "$log" | grep -q '"action":"invite"' || { echo "audit log thieu invite"; return 1; }
+  echo "$log" | grep -q '"action":"lock"' || { echo "audit log thieu lock"; return 1; }
+  curl -fsS -c "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-demo@example.local\",\"password\":\"$INVITE_PASS\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" >/dev/null
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/audit-log")" = "403" ]
+}
+demo_step "RBAC: audit log ghi invite + lock, sales xem log bi chan 403" rbac_audit_log
+
+rbac_cross_scope() {
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"email":"x-demo@example.local","password":"gia-lap-demo-123","role":"sales","branch_id":1}' \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite")" = "403" ]
+}
+demo_step "RBAC: sales moi nhan vien bi chan 403 (sai vai)" rbac_cross_scope
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -96,10 +147,12 @@ demo_step "gui lai cung idempotency key khong thuc thi lai" idempotency_demo
 backup_restore_demo() {
   ./scripts/backup.sh "$OMNIFLOW_DB" "$TMPDIR_DEMO/backup.db" >/dev/null
   [ -s "$TMPDIR_DEMO/backup.db" ] || return 1
+  local before
+  before="$(sqlite3 "$OMNIFLOW_DB" 'SELECT COUNT(*) FROM users;')"
   sqlite3 "$OMNIFLOW_DB" "DELETE FROM users;" || return 1
   [ "$(sqlite3 "$OMNIFLOW_DB" 'SELECT COUNT(*) FROM users;')" = "0" ] || return 1
   ./scripts/restore.sh "$TMPDIR_DEMO/backup.db" "$OMNIFLOW_DB" >/dev/null
-  [ "$(sqlite3 "$OMNIFLOW_DB" 'SELECT COUNT(*) FROM users;')" = "2" ]
+  [ "$(sqlite3 "$OMNIFLOW_DB" 'SELECT COUNT(*) FROM users;')" = "$before" ]
 }
 demo_step "backup tao file, restore dua du lieu ve dung trang thai" backup_restore_demo
 

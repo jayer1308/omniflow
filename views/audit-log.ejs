@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Nhật ký thao tác</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Nhật ký thao tác nhạy cảm</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>). Chỉ hiển thị bản ghi trong doanh nghiệp / phạm vi của bạn.</p>
+  <p><a href=\"/\">Về trang chính</a></p>
+  <% if (logs.length === 0) { %>
+    <p>Chưa có bản ghi nào.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Thao tác</th><th>Người thực hiện</th><th>Chi tiết</th><th>Lúc nào</th></tr>
+    </thead>
+    <tbody>
+      <% logs.forEach(function (log) { %>
+      <tr>
+        <td><%= log.id %></td>
+        <td><%= log.action %></td>
+        <td><%= log.user_id %></td>
+        <td><%= log.detail %></td>
+        <td><%= log.created_at %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</main>
+</body>
+</html>

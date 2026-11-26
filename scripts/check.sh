@@ -42,7 +42,7 @@ step "secret-scan" bash -c '
 smoke() {
   local tmpdir port server_pid owner_pass staff_pass cookie health login owner_only staff_only
   tmpdir="$(mktemp -d)"
-  trap 'kill "$server_pid" 2>/dev/null; rm -rf "$tmpdir"' RETURN
+  trap 'kill "${server_pid:-}" 2>/dev/null; rm -rf "${tmpdir:-}"' RETURN
   port="$(node -e "const s=require('net').createServer();s.listen(0,()=>{console.log(s.address().port);s.close();})")"
   owner_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
   staff_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
@@ -75,11 +75,43 @@ smoke() {
   local code
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$staff_cookie" "http://127.0.0.1:$port/owner-only")"
   [ "$code" = "403" ] || { echo "staff owner-only tra ve HTTP $code, mong 403"; return 1; }
+  # RBAC (GOAL-002): moi -> dang nhap vai moi -> khoa -> session cu bi chan
+  # -> xem audit log -> truy cap ngoai pham vi bi 403.
+  local invite_pass invite_res sales_cookie sales_login lock_res me_code login_code audit
+  invite_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  invite_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-rbac@example.local\",\"password\":\"$invite_pass\",\"role\":\"sales\",\"branch_id\":1}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  echo "$invite_res" | grep -q '"status":"active"' || { echo "invite tra ve: $invite_res"; return 1; }
+  echo "$invite_res" | grep -q "$invite_pass" && { echo "invite tra ve mat khau!"; return 1; }
+  sales_cookie="$tmpdir/sales-rbac-cookie.txt"
+  sales_login="$(curl -fsS -c "$sales_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-rbac@example.local\",\"password\":\"$invite_pass\"}" \
+    "http://127.0.0.1:$port/login")" || return 1
+  echo "$sales_login" | grep -q '"ok":true' || { echo "login sales moi tra ve: $sales_login"; return 1; }
+  # Sales dang active goi audit log phai bi 403 (sai vai); kiem tra luc session con song.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales_cookie" "http://127.0.0.1:$port/api/audit-log")"
+  [ "$code" = "403" ] || { echo "sales xem audit log tra ve HTTP $code, mong 403"; return 1; }
+  local sales_id
+  sales_id="$(echo "$invite_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")"
+  lock_res="$(curl -fsS -X POST -b "$cookie" "http://127.0.0.1:$port/api/users/$sales_id/lock")" || return 1
+  echo "$lock_res" | grep -q '"status":"locked"' || { echo "lock tra ve: $lock_res"; return 1; }
+  me_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales_cookie" "http://127.0.0.1:$port/me")"
+  [ "$me_code" = "401" ] || { echo "session cu sau khi khoa tra ve HTTP $me_code, mong 401"; return 1; }
+  login_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-rbac@example.local\",\"password\":\"$invite_pass\"}" \
+    "http://127.0.0.1:$port/login")"
+  [ "$login_code" = "403" ] || { echo "login tai khoan khoa tra ve HTTP $login_code, mong 403"; return 1; }
+  audit="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/audit-log")" || return 1
+  echo "$audit" | grep -q '"action":"invite"' || { echo "audit log thieu invite: $audit"; return 1; }
+  echo "$audit" | grep -q '"action":"lock"' || { echo "audit log thieu lock: $audit"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" "http://127.0.0.1:$port/api/orgs/9999/branches")"
+  [ "$code" = "403" ] || { echo "truy cap org khac tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403"
 }
 step "smoke server" smoke
 

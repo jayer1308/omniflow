@@ -21,7 +21,8 @@ const OWNER_EMAIL = 'owner@example.local';
 const STAFF_EMAIL = 'staff@example.local';
 
 /**
- * Seed dữ liệu GIẢ LẬP tối thiểu: 1 org, 1 branch, 1 owner + 1 staff.
+ * Seed dữ liệu GIẢ LẬP tối thiểu: 1 org, 1 branch, 1 owner + 1 sales
+ * (GOAL-002 remap staff cũ thành sales, giữ email staff@example.local).
  * Mật khẩu do người gọi cấp (biến môi trường hoặc sinh ngẫu nhiên ở CLI),
  * không có mật khẩu thật nào commit trong repo. Chạy lại thì không tạo trùng.
  */
@@ -53,7 +54,7 @@ export function seed(db: DatabaseSync, passwords: SeedPasswords): SeedResult {
   ).run(orgId, branchId, OWNER_EMAIL, ownerHash, 'owner', now);
   db.prepare(
     'INSERT INTO users (org_id, branch_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(orgId, branchId, STAFF_EMAIL, staffHash, 'staff', now);
+  ).run(orgId, branchId, STAFF_EMAIL, staffHash, 'sales', now);
   return { orgId, branchId, ownerEmail: OWNER_EMAIL, staffEmail: STAFF_EMAIL };
 }
 
