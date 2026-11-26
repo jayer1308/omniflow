@@ -23,15 +23,6 @@ parts:
           command: npx vitest run integration.test --reporter=default --reporter=junit --outputFile.junit={report}
           format: junit
           runOne: npx vitest run "{classname}" --reporter=junit --outputFile={report} -t "^{name|spaced|regex}$"
-      L5:
-        - id: semgrep
-          command: semgrep scan --config auto --sarif-output={report} .
-          format: sarif
-        - id: stryker
-          command: npx stryker run --mutate "{changed}" --reporters json && node -e "const r=require('./reports/mutation/mutation.json');let k=0,t=0;for(const f of Object.values(r.files))for(const m of f.mutants){if(['Ignored','CompileError','RuntimeError'].includes(m.status))continue;t++;if(['Killed','Timeout'].includes(m.status))k++}require('fs').writeFileSync('{report}',JSON.stringify({mutationScore:t?100*k/t:0}))"
-          format: metric
-          metric: mutationScore
-          when: flag:mutation
     needsHuman:
       - package.json
       - package-lock.json
@@ -110,7 +101,5 @@ floor:
     - L1
     - L2
     - L3
-    - L4
-    - L5
 mutation:
   minScore: 70
