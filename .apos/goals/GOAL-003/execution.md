@@ -1,11 +1,11 @@
-# GOAL-003 v1: solo-direct
+# GOAL-003 v2: solo-direct
 
 Một package WP-MAIN duy nhất xây toàn bộ sản phẩm/giá/CSV trong một lần: migration 008 tạo products/product_variants/categories/product_attributes/product_images/product_prices/price_history (UNIQUE org-scoped, CHECK giá nguyên đồng >= 0); mở rộng src/rbac.ts thêm 8 actions theo ma trận brief; routes /api/products, /api/categories, CSV preview/import/export (multipart, csv-parse/csv-stringify, atomic transaction, giới hạn 1000 dòng); fallback giá 8 bước + docs/PRICING.md kèm trường source; giá trùng -> 400; lịch sử giá append-only; audit log mọi thao tác; seed mở rộng giữ 2 user; docs/RBAC.md + D15/D16; mở rộng check.sh/demo.sh thêm bước sản phẩm/giá/CSV, giữ các bước GOAL-001/GOAL-002 xanh.
 
 ```json
 {
   "id": "GOAL-003",
-  "version": 1,
+  "version": 2,
   "goalId": "GOAL-003",
   "goalVersion": 1,
   "mode": "solo-direct",
@@ -37,7 +37,13 @@ Một package WP-MAIN duy nhất xây toàn bộ sản phẩm/giá/CSV trong m�
     ".gitignore"
   ],
   "stubPaths": [
-    "src/products.ts"
+    "src/products.ts",
+    "src/app.ts",
+    "src/auth.ts",
+    "src/db.ts",
+    "src/rbac.ts",
+    "src/seed.ts",
+    "src/tenant.ts"
   ],
   "entries": [
     "POST /api/products",

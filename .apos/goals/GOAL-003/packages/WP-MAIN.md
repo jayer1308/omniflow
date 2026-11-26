@@ -28,7 +28,7 @@
   ],
   "dependencies": [],
   "interfaces": [
-    "GOAL-003@v1"
+    "GOAL-003@v2"
   ],
   "acceptance": [
     {
@@ -84,7 +84,13 @@
     ".gitignore"
   ],
   "stubPaths": [
-    "src/products.ts"
+    "src/products.ts",
+    "src/app.ts",
+    "src/auth.ts",
+    "src/db.ts",
+    "src/rbac.ts",
+    "src/seed.ts",
+    "src/tenant.ts"
   ]
 }
 ```
