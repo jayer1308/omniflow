@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Đăng nhập — OmniFlow</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Đăng nhập</h1>
+  <form id="login-form">
+    <label>Email <input type="email" name="email" required autocomplete="username"></label>
+    <label>Mật khẩu <input type="password" name="password" required autocomplete="current-password"></label>
+    <button type="submit">Đăng nhập</button>
+  </form>
+  <p id="msg" role="alert"></p>
+  <p><a href="/">Về trang chủ</a></p>
+</main>
+<script>
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = Object.fromEntries(new FormData(e.target));
+  const res = await fetch('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  const msg = document.getElementById('msg');
+  if (res.ok) {
+    msg.textContent = 'Đăng nhập thành công.';
+    location.href = '/';
+  } else {
+    const body = await res.json().catch(() => ({}));
+    msg.textContent = body.error || 'Đăng nhập thất bại.';
+  }
+});
+</script>
+</body>
+</html>
