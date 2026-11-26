@@ -101,3 +101,14 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   phạm vi L0 thay vì làm yếu test.
 - Đổi khi: nâng Vitest lên bản nhận `node:sqlite`, hoặc sửa test qua
   `tests revise` rồi mở rộng include trở lại `tests/`.
+
+## D12 — Go symlink node_modules trước khi `npm ci` trong check/demo (26/11/2026)
+
+- Quyết định: `scripts/check.sh` và `scripts/demo.sh` kiểm tra `[ -L node_modules ]`
+  thì `rm node_modules` (chỉ gỡ link) trước khi chạy `npm ci`.
+- Lý do: gate APOS link `node_modules` của main checkout vào worktree bằng
+  symlink; `npm ci` chạy qua symlink xóa sạch thư mục đích ở main checkout
+  (đã tái hiện trực tiếp: main `node_modules` 177 mục → 0 mục), khiến các
+  layer chạy sau đó fail "Cannot find package" dù check tự PASS. Đã file
+  Kaiser1308/APOS#78.
+- Đổi khi: APOS sửa `prepareDependencies` (copy thay vì link, hoặc bảo vệ link).
