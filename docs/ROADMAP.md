@@ -23,6 +23,7 @@ Quy ước đặt tên: GOAL-001..GOAL-012 dưới đây. Appetite mặc định
 | GOAL-010 | Báo cáo + đối soát (M) | 005, 006, 007 | Doanh thu/số đơn/hoàn tiền/sản phẩm bán chạy theo thời gian; báo cáo tồn + biến động + cảnh báo; đối soát đơn–thanh toán–hoàn tiền–giao hàng; định nghĩa chỉ số + múi giờ + cách xử lý đơn hủy/trả; xuất CSV; test đối chiếu dữ liệu mẫu đã biết |
 | GOAL-011 | Thông báo + công việc nền (M) | 005 | Thông báo đơn mới/tồn thấp/giao thất bại; adapter email fake local; retry có giới hạn + theo dõi lỗi + tránh gửi trùng; kiểm tra/xử lý job nền thất bại |
 | GOAL-012 | UI tổng quan + polish + vận hành (M) | 002–011 | Màn hình tổng quan/sản phẩm/kho/đơn/khách/báo cáo; trạng thái tải/rỗng/lỗi/xác nhận; dùng được bằng bàn phím cho luồng chính; dữ liệu mẫu + hướng dẫn tự trải nghiệm; docs API + migration + sao lưu/khôi phục + nâng cấp dependency |
+| GOAL-005A | Adopt R-19 mồ côi (S, bookkeeping) | 004, 005 | Ngoài 12 goal chính: nhận yêu cầu R-19 của GOAL-004 (3 luồng giữ hàng tự động theo vòng đời đơn) về GOAL-005A và kiểm chứng lại bằng 10 test khóa mới trên code GOAL-005 đã có — không thêm tính năng |
 
 ## Ghi chú
 
