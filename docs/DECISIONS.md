@@ -249,3 +249,88 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   tầng service là đủ và giữ migration 009 gọn (chỉ thêm 3 bảng kho).
 - Đổi khi: kho có thể bị xóa (lúc đó phải gắn FK hoặc kiểm tra khi đọc), hoặc
   cần ràng buộc toàn vẹn ở tầng DB cho `warehouse_id`.
+
+## D19 — Mô hình đơn hàng: state machine, snapshot giá, giữ/giải phóng/commit release+out (27/11/2026)
+
+- Quyết định (GOAL-005, migration 010): đơn là dữ liệu **cấp org**
+  (`orders` có `org_id`, `branch_id` NOT NULL, `warehouse_id` NOT NULL —
+  client chọn kho lúc tạo đơn, không có kho mặc định ngầm; `code`
+  `UNIQUE(org_id, code)` dạng `DH-YYYYMMDD-NNNN`, số thứ tự trong ngày
+  theo từng org tính trong cùng transaction tạo đơn; `channel` CHECK
+  `counter`/`web`/`api`; `customer_name` chuỗi tự do, chưa có bảng khách
+  hàng; `status` CHECK state machine; `total` nguyên đồng, server tự
+  tính từ các dòng, không tin client). `order_items` snapshot giá tại
+  thời điểm đặt (`sku`/`name`/`unit_price`/`price_source`, `qty > 0`,
+  `line_total = unit_price * qty`, `UNIQUE(order_id, variant_id)` —
+  trùng biến thể trong cùng đơn → 400, không gộp lặng lẽ).
+  `order_events` append-only (`from_status` NULL khi tạo đơn), chỉ
+  INSERT, không có API sửa/xóa; `GET /api/orders/:id` trả `events` theo
+  thứ tự thời gian tăng dần (cũ nhất trước). Không có endpoint DELETE đơn.
+- State machine duy nhất: `draft → confirmed`, `confirmed → processing`,
+  `processing → completed`, `draft`/`confirmed`/`processing → cancelled`.
+  Mọi chuyển khác → 400, không đổi gì, không ghi event, không động kho.
+  Tạo đơn với 0 dòng → 400; biến thể của sản phẩm đã ngừng kinh doanh
+  → 400; kho `inactive` chặn cả tạo đơn lẫn xác nhận → 400.
+- Xác nhận = giữ hàng nguyên tử mọi dòng trong CÙNG MỘT transaction
+  `BEGIN IMMEDIATE` (`applyMovement` loại `reserve` cho từng dòng,
+  `reference` = mã đơn); dòng nào `qty > available` → 400
+  `insufficient_stock`, rollback toàn bộ, đơn ở lại `draft`, không ghi
+  movement nào. Hủy từ `confirmed`/`processing` giải phóng đúng số đã
+  giữ (`release`, cùng transaction với đổi trạng thái); hủy từ `draft`
+  chỉ đổi trạng thái.
+- Hoàn tất = **release + out trong CÙNG MỘT transaction** (commit giữ
+  hàng → xuất): `applyMovement` loại `out` yêu cầu `qty <= available`
+  và KHÔNG trừ `reserved` (D17), nên xuất trực tiếp khi đơn đang giữ
+  hàng sẽ để `reserved` treo mãi và `available` sai sau đó. Mỗi dòng:
+  (1) `release` đúng số đã giữ, rồi (2) `out` đúng số đó; cả hai
+  movement cùng `reference` = mã đơn. Bước nào lỗi thì rollback toàn bộ
+  — không có trạng thái "đã giải phóng nhưng chưa xuất". KHÔNG thêm loại
+  movement mới `fulfill`.
+- Idempotency cho tạo đơn + mọi chuyển trạng thái qua
+  `withStockIdempotency` (kiểm tra key + thực thi + ghi key trong CÙNG
+  MỘT transaction `BEGIN IMMEDIATE`), tên miền key
+  `order:create:<key>` / `order:<hành động>:<key>`; gửi lại trả đúng
+  response đã lưu kèm `replayed: true`, NGAY CẢ KHI đơn đã chuyển tiếp
+  sang trạng thái khác sau đó. Không dùng `withIdempotency` của GOAL-001
+  cho đơn (kiểm tra key ngoài transaction, có khe race). Thiếu key vẫn
+  thực thi (không bắt buộc) nhưng không có bảo vệ gửi lại.
+- Chống bán quá tồn: mọi giữ/xuất qua `applyMovement` trong
+  `BEGIN IMMEDIATE` + `CHECK` ở DB (D17). App là **một tiến trình duy
+  nhất** (D1) nên bảo vệ race chỉ có ý nghĩa trong một process; đa
+  process ngoài phạm vi — không claim chống race đa process. Test đồng
+  thời chứng minh bất biến (tổng giữ <= `available`, tồn không âm,
+  `reserved` không vượt `on_hand`), không chứng minh được đa process.
+- RBAC đơn: `can()` mở rộng 6 actions (`create-order`, `confirm-order`,
+  `process-order`, `complete-order`, `cancel-order`, `view-orders`) theo
+  ma trận `docs/RBAC.md` — tạo/xác nhận/hủy: owner/manager/sales (đúng
+  chi nhánh); xử lý/hoàn tất: owner/manager/warehouse (đúng kho);
+  xem: mọi vai, sales lọc chi nhánh mình, warehouse lọc kho được gán,
+  accountant toàn org chỉ xem.
+- Audit log: mọi thao tác đơn ghi `audit_log` (`action` tạo/xác
+  nhận/xử lý/hoàn tất/hủy, `detail` JSON `target_order_id`/`order_code`/
+  `from_status`/`to_status`/`total`); `order_events` là lịch sử trạng
+  thái chi tiết, `audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai
+  đều phải có, không thay nhau.
+- Lý do: các quyết định này đều đã ghi trong brief GOAL-005; chốt lại ở
+  đây để GOAL-006 (thanh toán) và GOAL-007 (giao hàng) dùng tiếp luồng
+  đơn mà không phải đoán lại.
+- Đổi khi: cần trạng thái thanh toán/giao hàng trên đơn (Goal sau thêm
+  trường), đa process thật (thay store), hoặc cho phép bán quá tồn
+  (Goal riêng đổi chính sách).
+
+## D20 — Tách hàm resolve giá hiệu dụng dùng chung (27/11/2026)
+
+- Quyết định (GOAL-005): logic resolve giá hiệu dụng theo fallback 8
+  bước vốn nằm inline trong route `GET /api/products/:id/price`
+  (đọc `product_prices` rồi gọi `effectivePrice()`) được tách thành
+  `resolveEffectivePrice()` ở `src/products.ts`; route giá và luồng tạo
+  đơn (snapshot giá tại thời điểm đặt) cùng dùng một hàm, không viết lại
+  2 lần. Hàm nhận `productId`/`basePrice`/`variantId`/`variantOverride`/
+  `channel`/`branchId`, tự đọc `product_prices` và trả `{price, source}`.
+- Lý do: giá snapshot của đơn phải khớp đúng giá hiệu dụng GOAL-003
+  (phụ thuộc cả kênh lẫn chi nhánh) — hai bản sao của logic tìm giá sẽ
+  lệch nhau theo thời gian (ví dụ một bên sửa thứ tự fallback, bên kia
+  quên). Tách ra thì route giá và đơn luôn đồng nhất; test snapshot giá
+  (đổi giá sau không đổi giá đơn) kiểm chứng cả hai qua cùng một hàm.
+- Đổi khi: giá cần thêm nguồn mới ngoài 8 bước (sửa `effectivePrice()` +
+  `resolveEffectivePrice()` cùng lúc, một chỗ duy nhất).

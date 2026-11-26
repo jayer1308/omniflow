@@ -69,7 +69,15 @@ export type Action =
   | 'stock-reserve'
   | 'stock-release'
   | 'view-stock'
-  | 'view-stock-movements';
+  | 'view-stock-movements'
+  // GOAL-005: đơn hàng (xem docs/RBAC.md, ma trận đơn). Phạm vi đơn gate
+  // cả chi nhánh (branchId) lẫn kho (warehouseId đã có từ GOAL-004).
+  | 'create-order'
+  | 'confirm-order'
+  | 'process-order'
+  | 'complete-order'
+  | 'cancel-order'
+  | 'view-orders';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -193,6 +201,35 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
         return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
       }
       return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant';
+    // GOAL-005: ma trận đơn (docs/RBAC.md). Tạo/xác nhận/hủy đơn: owner/
+    // manager toàn org, sales chỉ đúng chi nhánh của mình; warehouse và
+    // accountant không được. Xử lý/hoàn tất đơn: owner/manager toàn org,
+    // warehouse chỉ đơn có warehouse_id trong phạm vi của mình (NULL = mọi
+    // kho); sales và accountant không được. Xem đơn: owner/manager/
+    // accountant toàn org, sales chỉ chi nhánh mình, warehouse chỉ kho mình.
+    case 'create-order':
+    case 'confirm-order':
+    case 'cancel-order': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'process-order':
+    case 'complete-order': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'warehouse') return false;
+      return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+    }
+    case 'view-orders': {
+      if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
+        return true;
+      }
+      if (actor.role === 'sales') return inScope(actor.branchId, targetBranch);
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return false;
+    }
     default:
       return false;
   }

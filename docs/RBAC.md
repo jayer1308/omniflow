@@ -143,6 +143,59 @@ nhánh của manager không; các vai khác → 403). `stock_movements` là lị
 chi tiết, `audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai đều phải
 có, không thay nhau.
 
+## Ma trận quyền đơn hàng (GOAL-005, D19)
+
+Đơn là dữ liệu **cấp org**, có chi nhánh + kho xuất hàng bắt buộc
+(`orders.branch_id`, `orders.warehouse_id` NOT NULL). Phạm vi đơn gate
+CẢ hai chiều: chi nhánh của đơn (`branch_id`) và kho của đơn
+(`warehouse_id`). Helper `can()` mở rộng 6 actions: `create-order`,
+`confirm-order`, `process-order`, `complete-order`, `cancel-order`,
+`view-orders`; kiểu `Target` dùng `branchId` + `warehouseId` đã có.
+Mọi endpoint đơn qua `requireAuth` + `can()`.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Tạo đơn (`POST /api/orders`) | Được | Được | Được (đúng chi nhánh của mình) | Không (403) | Không (403) |
+| Xác nhận đơn (`POST /api/orders/:id/confirm`) | Được | Được | Được (đơn thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Xử lý đơn (`POST /api/orders/:id/process`) | Được | Được | Không (403) | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình (`warehouse_id` NULL = mọi kho) | Không (403) |
+| Hoàn tất đơn (`POST /api/orders/:id/complete`) | Được | Được | Không (403) | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Không (403) |
+| Hủy đơn (`POST /api/orders/:id/cancel`) | Được | Được | Được (đơn thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Xem danh sách/chi tiết đơn (`GET /api/orders...`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh của mình | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Được, toàn org (chỉ xem) |
+
+Lưu ý:
+
+- `sales` xem đơn ngoài chi nhánh của mình → 403; `warehouse` xem đơn có
+  kho ngoài phạm vi → 403; mọi vai xem đơn ngoài org → 403.
+- Chi nhánh của đơn lấy từ người tạo: user có `branchId` thì đơn thuộc chi
+  nhánh đó (body gửi `branch_id` khác → 403); user toàn org (`branchId`
+  NULL, chỉ owner/manager) thì body PHẢI có `branch_id` thuộc org (thiếu
+  hoặc ngoài org → 400/403).
+- Không có endpoint DELETE đơn (chỉ hủy bằng trạng thái, giữ lịch sử);
+  không có API sửa/xóa `order_events` (gọi → 404).
+- Idempotency: header `Idempotency-Key` hoặc trường `idempotency_key`
+  trong body; tên miền key `order:create:<key>` /
+  `order:<hành động>:<key>`; gửi lại trả đúng response cũ kèm
+  `replayed: true`. Thiếu key vẫn thực thi (không bắt buộc) nhưng không
+  có bảo vệ gửi lại.
+
+### Endpoints mới (GOAL-005)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/orders` | owner / manager / sales (đúng chi nhánh); warehouse / accountant → 403 |
+| `GET /api/orders`, `GET /api/orders/:id` | mọi vai, lọc theo phạm vi (sales: chi nhánh mình; warehouse: kho được gán; accountant: toàn org, chỉ xem) |
+| `POST /api/orders/:id/confirm`, `/cancel` | owner / manager / sales (đơn thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `POST /api/orders/:id/process`, `/complete` | owner / manager / warehouse (đơn có kho trong phạm vi mình); sales / accountant → 403 |
+
+Audit log: mọi thao tác tạo đơn, xác nhận/xử lý/hoàn tất/hủy đều ghi
+`audit_log` (`action` `create-order`/`confirm-order`/`process-order`/
+`complete-order`/`cancel-order`, `detail` JSON với `target_order_id`,
+`order_code`, `from_status`/`to_status`, `total`). Xem log theo luật
+GOAL-002 (`GET /api/audit-log`: `owner` toàn org, `manager` trong phạm
+vi, các vai khác → 403). `order_events` là lịch sử trạng thái chi tiết,
+`audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai đều phải có,
+không thay nhau.
+
 ### Endpoints mới (GOAL-003)
 
 | Endpoint | Vai trò |

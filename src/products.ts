@@ -5,6 +5,7 @@
  * - parseProductCsvWithLines(): như trên, kèm số dòng vật lý (header là dòng 1)
  *   để báo lỗi từng dòng khi validate import.
  */
+import type { DatabaseSync } from 'node:sqlite';
 import { parse } from 'csv-parse/sync';
 
 export type PriceSource =
@@ -143,4 +144,62 @@ export type AllowedChannel = (typeof ALLOWED_CHANNELS)[number];
 
 export function isAllowedChannel(channel: string): channel is AllowedChannel {
   return (ALLOWED_CHANNELS as readonly string[]).includes(channel);
+}
+
+export interface EffectivePriceLookup {
+  productId: number;
+  basePrice: number;
+  variantId: number | null;
+  variantOverride?: number | null;
+  channel: string | null;
+  branchId: number | null;
+}
+
+interface PriceLookupRow {
+  variant_id: number | null;
+  channel: string | null;
+  branch_id: number | null;
+  price: number;
+}
+
+/**
+ * Resolve giá hiệu dụng dùng chung (D20, GOAL-005): đọc các dòng
+ * product_prices của sản phẩm rồi chạy cùng fallback 8 bước như
+ * effectivePrice(). Route GET /api/products/:id/price và luồng tạo đơn
+ * (snapshot giá tại thời điểm đặt) cùng dùng hàm này, không viết lại
+ * logic tìm giá 2 lần.
+ */
+export function resolveEffectivePrice(
+  db: DatabaseSync,
+  input: EffectivePriceLookup,
+): { price: number; source: PriceSource } {
+  const rows = db
+    .prepare('SELECT variant_id, channel, branch_id, price FROM product_prices WHERE product_id = ?')
+    .all(input.productId) as unknown as PriceLookupRow[];
+  const findPrice = (
+    wantVariant: number | null,
+    wantChannel: string | null,
+    wantBranch: number | null,
+  ): number | null => {
+    const row = rows.find(
+      (r) =>
+        (r.variant_id ?? null) === wantVariant &&
+        (r.channel ?? null) === wantChannel &&
+        (r.branch_id ?? null) === wantBranch,
+    );
+    return row ? row.price : null;
+  };
+  return effectivePrice({
+    basePrice: input.basePrice,
+    variantOverride: input.variantOverride ?? null,
+    variantChannelBranch:
+      input.variantId === null ? null : findPrice(input.variantId, input.channel, input.branchId),
+    variantChannel:
+      input.variantId === null ? null : findPrice(input.variantId, input.channel, null),
+    variantBranch:
+      input.variantId === null ? null : findPrice(input.variantId, null, input.branchId),
+    productChannelBranch: findPrice(null, input.channel, input.branchId),
+    productChannel: findPrice(null, input.channel, null),
+    productBranch: findPrice(null, null, input.branchId),
+  });
 }
