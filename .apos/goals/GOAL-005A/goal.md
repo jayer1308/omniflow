@@ -1,6 +1,6 @@
 # GOAL-005A v2: OmniFlow adopt yeu cau mo coi R-19 (GOAL-004): 3 luong tu dong theo vong doi don — xac nhan giu hang nguyen tu, huy giai phong dung so da giu, hoan tat release + out trong 1 transaction — duoc kiem chung lai bang test khoa moi tren code GOAL-005 da co (khong them tinh nang); check/demo van xanh; docs ghi chu goal bookkeeping ngoai 12 goal chinh; inbox sach sau close
 
-Status: testing
+Status: verified
 
 ```json
 {
