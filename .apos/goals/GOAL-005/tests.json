@@ -1,0 +1,68 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/orders-acceptance.test.ts::AC-1 migration 010 tao du 3 bang don + cot + UNIQUE/CHECK",
+      "tests/orders-acceptance.test.ts::AC-1 tao don 201 kem items snapshot gia web + total server tinh; code DH-YYYYMMDD-NNNN; don o draft, ton khong doi",
+      "tests/orders-acceptance.test.ts::AC-1 tao don kenh counter snapshot gia goc source base; don 2 dong tong dung",
+      "tests/orders-acceptance.test.ts::AC-1 snapshot gia: doi gia sau khi dat don khong doi gia don",
+      "tests/orders-acceptance.test.ts::AC-1 tao don sai dau vao bi 400: channel la, items rong, qty 0/am/khong nguyen, trung bien the",
+      "tests/orders-acceptance.test.ts::AC-1 tao don bien the khong ton tai 404, bien the org B 403/404, kho khong ton tai 404, kho org B 403/404",
+      "tests/orders-acceptance.test.ts::AC-1 tao don kho inactive 400; branch_id khac chi nhanh actor 403; manager thieu branch_id 400/403",
+      "tests/orders-acceptance.test.ts::AC-1 tao don bien the san pham ngung kinh doanh 400",
+      "tests/orders-acceptance.test.ts::AC-1 khong co endpoint DELETE don: DELETE tra 404/405 va don van doc duoc",
+      "tests/orders-acceptance.test.ts::AC-1 GET /api/orders/:id tra don kem items + events theo thu tu tao truoc; don khong ton tai 404",
+      "tests/orders-acceptance.test.ts::AC-1 GET /api/orders loc status/channel/code/customer_name + phan trang limit/offset + total, moi nhat truoc",
+      "tests/orders-acceptance.test.ts::AC-1 canTransition truc tiep: chuyen hop le true, chuyen sai false (src/orders.ts)",
+      "tests/orders-acceptance.test.ts::AC-1 formatOrderCode truc tiep: DH-YYYYMMDD-NNNN dung dinh dang (src/orders.ts)"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/orders-acceptance.test.ts::AC-2 xac nhan giu dung so: reserved tang, on_hand khong doi, movement reserve reference ma don, event draft->confirmed",
+      "tests/orders-acceptance.test.ts::AC-2 xac nhan thieu ton 400 insufficient_stock: khong giu dong nao, don o lai draft, khong ghi movement/event",
+      "tests/orders-acceptance.test.ts::AC-2 xac nhan 2 lan: lan 2 bi 400, khong doi kho, khong them event",
+      "tests/orders-acceptance.test.ts::AC-2 chuyen sai 400: draft->process, draft->complete, processing->confirm, completed->cancel, huy 2 lan",
+      "tests/orders-acceptance.test.ts::AC-2 hoan tat release + out dung so hoc: reserved ve 0, on_hand tru dung, 2 movement release + out",
+      "tests/orders-acceptance.test.ts::AC-2 huy tu draft chi doi trang thai, khong dong kho, event luu note",
+      "tests/orders-acceptance.test.ts::AC-2 huy tu confirmed giai phong dung so da giu",
+      "tests/orders-acceptance.test.ts::AC-2 huy khi dang processing giai phong dung so: reserved ve 0, on_hand khong doi, available ve nhu truoc xac nhan",
+      "tests/orders-acceptance.test.ts::AC-2 kho inactive chan xac nhan 400: don tao khi kho active, khoa kho roi xac nhan bi 400, don o lai draft",
+      "tests/orders-acceptance.test.ts::AC-2 order_events append-only: PATCH/DELETE lich su tra 404/405 va lich su van nguyen"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/orders-acceptance.test.ts::AC-3 idempotency tao don: gui lai cung Idempotency-Key (header) -> cung ma don, chi 1 don, replayed true",
+      "tests/orders-acceptance.test.ts::AC-3 idempotency tao don qua body idempotency_key: cung key replayed true, key khac tao don moi",
+      "tests/orders-acceptance.test.ts::AC-3 idempotency xac nhan: gui lai cung key -> replayed true, reserved + movement khong doi; replay tra response cu ngay ca khi don da chuyen tiep",
+      "tests/orders-acceptance.test.ts::AC-3 race 10 xac nhan dong thoi: tong giu <= available, don vuot 400 insufficient_stock, ton khong am",
+      "tests/orders-acceptance.test.ts::AC-3 race xac nhan cung don 2 lan dong thoi (khac key): chi 1 lan thanh cong, lan con lai 400",
+      "tests/orders-acceptance.test.ts::AC-3 race gui lai cung idempotency key dong thoi: chi 1 lan thuc thi",
+      "tests/orders-acceptance.test.ts::AC-3 race tao don cung key dong thoi: chi 1 don duoc tao"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/orders-acceptance.test.ts::AC-4 can() 6 actions don theo ma tran (src/rbac.ts)",
+      "tests/orders-acceptance.test.ts::AC-4 RBAC 403 qua HTTP: warehouse tao don, accountant xac nhan, sales xu ly don",
+      "tests/orders-acceptance.test.ts::AC-4 sales xac nhan don ngoai chi nhanh 403; sales xem don ngoai chi nhanh 403",
+      "tests/orders-acceptance.test.ts::AC-4 warehouse hoan tat don kho ngoai pham vi 403; warehouse trong pham vi duoc xu ly/hoan tat",
+      "tests/orders-acceptance.test.ts::AC-4 org A doc don org B 403: ownerB GET chi tiet 403/404, list khong thay don org A",
+      "tests/orders-acceptance.test.ts::AC-4 audit log don: tao/xac nhan/xu ly/hoan tat/huy deu ghi audit voi actor + detail day du",
+      "tests/orders-acceptance.test.ts::AC-4 RBAC tao don: accountant 403, manager duoc, sales dung chi nhanh duoc, sales sai chi nhanh 403",
+      "tests/orders-acceptance.test.ts::AC-4 warehouse xem don: chi don co kho trong pham vi; accountant xem duoc toan org"
+    ]
+  }
+]

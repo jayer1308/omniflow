@@ -2886,5 +2886,24 @@ export function createApp(db: DatabaseSync): Express {
     res.json(queryLevels(actor, scope, null, true, 1000, 0));
   });
 
+  // ---------- Don hang da kenh (GOAL-005) — STUB cho Tester ----------
+  // Worker thay bang logic that: hien tai moi endpoint don tra 501
+  // "not implemented" de test acceptance DO dung ly do. Ca route DELETE
+  // don / sua-xoa lich su don cung la stub 501 (khong phai 404) de test
+  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
+  const orderNotImplemented = (_req: TenantRequest, res: Response): void => {
+    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
+  };
+  app.post('/api/orders', orderNotImplemented);
+  app.get('/api/orders', orderNotImplemented);
+  app.get('/api/orders/:id', orderNotImplemented);
+  app.delete('/api/orders/:id', orderNotImplemented);
+  app.post('/api/orders/:id/confirm', orderNotImplemented);
+  app.post('/api/orders/:id/process', orderNotImplemented);
+  app.post('/api/orders/:id/complete', orderNotImplemented);
+  app.post('/api/orders/:id/cancel', orderNotImplemented);
+  app.patch('/api/orders/:id/events/:eventId', orderNotImplemented);
+  app.delete('/api/orders/:id/events/:eventId', orderNotImplemented);
+
   return app;
 }
