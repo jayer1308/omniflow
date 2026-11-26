@@ -1,0 +1,382 @@
+# GOAL-004 v1: OmniFlow kho da kho + ton giu/co the ban: nhieu kho trong org (CRUD, khong xoa cung); nhap/xuat/dieu chinh/kiem ke/chuyen kho nguyen tu; ton thuc te / ton giu / ton co the ban (available = on-hand - reserved); lich su bien dong append-only; canh bao ton thap theo min_stock; idempotency + chong race trong transaction; chinh sach khong ton am; RBAC kho theo vai + pham vi kho + audit log; check/demo mo rong buoc kho van xanh
+
+Status: approved
+
+```json
+{
+  "id": "GOAL-004",
+  "version": 1,
+  "outcome": "OmniFlow kho da kho + ton giu/co the ban: nhieu kho trong org (CRUD, khong xoa cung); nhap/xuat/dieu chinh/kiem ke/chuyen kho nguyen tu; ton thuc te / ton giu / ton co the ban (available = on-hand - reserved); lich su bien dong append-only; canh bao ton thap theo min_stock; idempotency + chong race trong transaction; chinh sach khong ton am; RBAC kho theo vai + pham vi kho + audit log; check/demo mo rong buoc kho van xanh",
+  "source": {
+    "path": "brief-004.md",
+    "sha256": "a83e40111118d17ac74d1e1049134daca6958f7e46aa5126a7cf8b22f3884579",
+    "capturedAt": "2026-11-26T16:44:57.512Z",
+    "origin": "PM (coordinator) — brief GOAL-004, roadmap OmniFlow"
+  },
+  "requirements": [
+    {
+      "id": "R-1",
+      "sourceSpan": "dòng 165",
+      "text": "Migration 009 tạo bảng warehouses (org_id NOT NULL FK tới orgs, name TEXT NOT NULL, branch_id NULL FK tới branches — chi nhánh phụ trách, optional, chỉ để hiển thị, status TEXT NOT NULL DEFAULT 'active' CHECK ('active','inactive'), created_at/updated_at): tên bắt buộc (rỗng → 400); migration chạy tuần tự sau 001–008, giữ dữ liệu cũ, không vỡ 83 test đã khóa.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-2",
+      "sourceSpan": "dòng 171",
+      "text": "Migration 009 tạo bảng stock_levels (org_id NOT NULL FK tới orgs, warehouse_id NOT NULL FK tới warehouses, variant_id NOT NULL FK tới product_variants, on_hand INTEGER NOT NULL DEFAULT 0 CHECK >= 0, reserved INTEGER NOT NULL DEFAULT 0 CHECK >= 0, updated_at): UNIQUE(org_id, warehouse_id, variant_id); CHECK (reserved <= on_hand); tồn của biến thể ngoài org → 403/404. Không có dòng tồn cấp sản phẩm (không có biến thể thì không nhập kho được — nhập kho sản phẩm chưa có biến thể → 400).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-3",
+      "sourceSpan": "dòng 179",
+      "text": "Migration 009 tạo bảng stock_movements append-only (org_id NOT NULL FK, warehouse_id NOT NULL FK, variant_id NOT NULL FK, type TEXT NOT NULL CHECK IN ('in','out','adjust','count','transfer_in','transfer_out','reserve','release'), qty_change INTEGER NOT NULL — phần thay đổi của tồn thực tế, có dấu, reserved_change INTEGER NOT NULL DEFAULT 0 — phần thay đổi của tồn giữ, on_hand_after INTEGER NOT NULL, reserved_after INTEGER NOT NULL, reason TEXT NOT NULL, reference TEXT NULL, actor_id NOT NULL FK tới users, created_at): chỉ INSERT, không có API UPDATE/DELETE lịch sử (gọi sửa/xóa → 404/405).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-4",
+      "sourceSpan": "dòng 189",
+      "text": "API kho: POST /api/warehouses tạo (201, trả kho đã tạo; chỉ owner), GET /api/warehouses liệt kê (lọc theo org của user, lọc theo status/branch_id), GET /api/warehouses/:id chi tiết, PATCH /api/warehouses/:id sửa (tên, status; chỉ owner). KHÔNG có endpoint DELETE kho. Kho inactive vẫn đọc được (chi tiết + lịch sử) nhưng thao tác tồn mới → 400. Mọi response không bao giờ lộ dữ liệu org khác.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-5",
+      "sourceSpan": "dòng 196",
+      "text": "API nhập/xuất kho: POST /api/stock/in và POST /api/stock/out nhận {warehouse_id, variant_id, qty, reason, idempotency_key?} — qty phải là số nguyên > 0 (0/âm/không nguyên → 400), reason bắt buộc (rỗng → 400), kho/biến thể không tồn tại hoặc ngoài org → 404/403, biến thể của sản phẩm đã ngừng kinh doanh vẫn nhập/xuất được (hàng vật lý vẫn còn). Nhập: on_hand += qty. Xuất: yêu cầu qty <= available (vi phạm → 400 insufficient_stock), on_hand -= qty, reserved không đổi. Mỗi lần thành công ghi 1 dòng movement (in/out) + trả mức tồn mới {on_hand, reserved, available, low_stock}. Cả hai chạy trong một transaction BEGIN IMMEDIATE.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-6",
+      "sourceSpan": "dòng 206",
+      "text": "API điều chỉnh + kiểm kê: POST /api/stock/adjust nhận {warehouse_id, variant_id, qty_change, reason, idempotency_key?} — qty_change là số nguyên có dấu khác 0 (0 → 400); điều chỉnh làm on_hand < 0 hoặc on_hand < reserved → 400, không ghi gì. POST /api/stock/count nhận {warehouse_id, variant_id, counted_qty, reason, idempotency_key?} — counted_qty là số nguyên >= 0, đặt on_hand = counted_qty (chênh lệch ghi vào movement count với qty_change = counted_qty - on_hand_cũ); counted_qty < reserved → 400. Cả hai bắt buộc reason, ghi movement + trả mức tồn mới, chạy trong transaction.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-7",
+      "sourceSpan": "dòng 216",
+      "text": "API chuyển kho nguyên tử: POST /api/stock/transfer nhận {from_warehouse_id, to_warehouse_id, variant_id, qty, reason, idempotency_key?} — qty nguyên > 0, hai kho phải khác nhau (giống nhau → 400), cùng org (khác org → 403), kho nguồn phải có qty <= available (không đủ → 400 insufficient_stock, kho đích không đổi gì); thành công thì trong CÙNG MỘT transaction: kho nguồn on_hand -= qty (movement transfer_out) + kho đích on_hand += qty (movement transfer_in, tạo dòng stock_levels nếu chưa có). Kho đích inactive → 400.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-8",
+      "sourceSpan": "dòng 225",
+      "text": "API giữ/giải phóng hàng: POST /api/stock/reserve nhận {warehouse_id, variant_id, qty, reason, reference?, idempotency_key?} — qty nguyên > 0, qty <= available (không đủ → 400 insufficient_stock); reserved += qty, on_hand không đổi; movement reserve (qty_change = 0, reserved_change = qty). POST /api/stock/release nhận cùng định dạng — qty <= reserved (vượt → 400); reserved -= qty; movement release (reserved_change = -qty). reference là chuỗi tự do (ví dụ mã đơn sau này), chỉ lưu, không kiểm tra tồn tại.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-9",
+      "sourceSpan": "dòng 234",
+      "text": "API đọc tồn: GET /api/stock/levels?warehouse_id=&variant_id=&low_stock=true|false&limit=&offset= trả danh sách mức tồn của org (kèm product_id, sku, on_hand, reserved, available, low_stock — available < products.min_stock); vai warehouse chỉ thấy kho được gán; GET /api/stock/movements?warehouse_id=&variant_id=&type=&limit=&offset= trả mới nhất trước (kèm on_hand_after, reserved_after, reason, reference, actor_id); GET /api/stock/low-stock?warehouse_id= trả các cặp (biến thể, kho) có available < min_stock kèm min_stock và available. Mọi API đọc lọc theo org, không lộ org khác.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-10",
+      "sourceSpan": "dòng 244",
+      "text": "Idempotency cho thao tác tồn: nhập/xuất/điều chỉnh/kiểm kê/chuyển/giữ/giải phóng đều nhận Idempotency-Key (header) hoặc idempotency_key (body); server đặt tên miền key là stock:<loại thao tác>:<key>; gửi lại cùng key + cùng loại + cùng org → trả đúng response đã lưu kèm replayed: true, KHÔNG thực thi lại (số tồn và số movement không đổi — test chứng minh); kiểm tra key + thực thi + ghi key nằm trong CÙNG MỘT transaction BEGIN IMMEDIATE (không dùng withIdempotency hiện tại một cách ngây thơ vì nó kiểm tra key ngoài transaction). Key khác nhau thì thực thi bình thường. Thiếu key thì vẫn thực thi (không bắt buộc gửi key) nhưng không có bảo vệ gửi lại.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-11",
+      "sourceSpan": "dòng 255",
+      "text": "Chống race: mọi biến động tồn chạy trong BEGIN IMMEDIATE + bất biến ép bằng CHECK trong schema; test gửi đồng thời nhiều yêu cầu xuất (ví dụ 10 yêu cầu xuất 10 trong khi available = 50) — tổng xuất thành công không vượt available, tồn cuối không âm, các yêu cầu vượt nhận 400 insufficient_stock. Test gửi lại cùng idempotency key đồng thời — chỉ 1 lần thực thi.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-12",
+      "sourceSpan": "dòng 261",
+      "text": "Cảnh báo tồn thấp: ngưỡng = products.min_stock (D15, cấp sản phẩm); cặp (biến thể, kho) có available < min_stock là tồn thấp; GET /api/stock/low-stock liệt kê đúng các cặp đó (kèm min_stock, available, on_hand, reserved); mức tồn trong GET /api/stock/levels kèm cờ low_stock; seed có ít nhất một cặp tồn thấp để demo thấy được.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-13",
+      "sourceSpan": "dòng 267",
+      "text": "RBAC kho: mở rộng helper can() ở src/rbac.ts thêm actions create-warehouse, manage-warehouse, stock-in, stock-out, stock-adjust, stock-count, stock-transfer, stock-reserve, stock-release, view-stock, view-stock-movements theo đúng ma trận trong brief (kiểu Target mở rộng warehouseId); mọi endpoint kho qua requireRole + can() (vai sai → 403, ngoài org → 403, sai kho được gán → 403, chuyển kho khi một trong hai kho ngoài phạm vi → 403). Gán warehouse_id qua PATCH /api/users/:id/scope phải kiểm tra kho tồn tại trong cùng org (không tồn tại/ngoài org → 400/403). Test chứng minh từng ô cấm trong ma trận (ít nhất: sales nhập kho → 403, accountant xuất kho → 403, warehouse nhập kho ngoài kho được gán → 403, manager tạo kho → 403, sales xem movements → 403, user org A đọc/tạo kho org B → 403).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-14",
+      "sourceSpan": "dòng 280",
+      "text": "Audit log cho kho: ghi vào audit_log đã có MỌI thao tác tạo/sửa kho, nhập/xuất/điều chỉnh/kiểm kê/chuyển/giữ/giải phóng; mỗi bản ghi có user_id người thực hiện, created_at, action + detail JSON (target_warehouse_id, target_variant_id và before/after với on_hand/reserved, KHÔNG chứa dữ liệu nhạy cảm); xem log theo luật GOAL-002 (GET /api/audit-log: owner toàn org, manager trong phạm vi, các vai khác → 403). Lưu ý: stock_movements đã là lịch sử chi tiết; audit_log là lớp ghi nhận thao tác nhạy cảm theo chuẩn GOAL-002 — cả hai đều phải có, không thay nhau.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-15",
+      "sourceSpan": "dòng 289",
+      "text": "Test mới (vitest + supertest, thêm vào file test mới — KHÔNG sửa 83 test đã khóa của GOAL-001/002/003): chứng minh nhập/xuất đúng số học (available = on_hand - reserved), xuất quá available → 400 và không ghi movement, giữ/giải phóng đúng số học (xuất không trừ reserved), chuyển kho nguyên tử (nguồn không đủ → đích không đổi; thành công → 2 movement đúng loại), điều chỉnh/kiểm kê có lý do bắt buộc + đúng số học + không làm on_hand < reserved, idempotency (gửi lại cùng key → replayed: true, tồn + movement không đổi), race (đồng thời nhiều xuất → tổng không vượt available, tồn không âm), tồn thấp (đúng cặp, đúng cờ low_stock), RBAC 403 theo ma trận (yêu cầu 13), kho inactive chặn thao tác tồn mới → 400, nhập kho sản phẩm chưa có biến thể → 400. Test dùng dữ liệu giả lập (2 org, 2 kho trở lên trong cùng org, 2 biến thể trở lên).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-16",
+      "sourceSpan": "dòng 302",
+      "text": "Dữ liệu GIẢ LẬP hoàn toàn; mật khẩu seed qua biến môi trường (như GOAL-001/002/003: OMNIFLOW_SEED_*_PASSWORD), không commit credential thật; check.sh vẫn quét secret (grep như GOAL-001); seed mở rộng thêm 2 kho mẫu + mức tồn mẫu cho sản phẩm seed (giữ 2 user để test khóa vẫn xanh; ít nhất một cặp tồn thấp để demo).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-17",
+      "sourceSpan": "dòng 307",
+      "text": "scripts/check.sh (CHK-1) và scripts/demo.sh (CHK-2) được MỞ RỘNG trong goal này: thêm bước kho vào smoke/demo (tạo kho → nhập kho → xuất kho → xuất quá tồn 400 → giữ hàng → giải phóng → chuyển kho → kiểm kê → tồn thấp → idempotency gửi lại không trừ 2 lần → race đồng thời → RBAC 403: sales nhập kho, warehouse nhập kho ngoài phạm vi, ngoài org), giữ tất cả bước GOAL-001/002/003 xanh (health, login, owner-only, idempotency, backup/restore, RBAC người dùng, sản phẩm/giá/CSV). Cả 2 script tự chạy được, tự dọn dẹp, in PASS/FAIL từng bước.",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-18",
+      "sourceSpan": "dòng 316",
+      "text": "Docs: docs/RBAC.md bổ sung ma trận kho (bảng ở trên) + mô hình phạm vi kho (users.warehouse_id); docs/DECISIONS.md thêm D17 (mô hình kho: tồn theo biến thể, available tính được, chính sách không tồn âm, reserve độc lập cho GOAL-005, ngưỡng min_stock, idempotency trong transaction, race một process) và D18 (cơ chế kiểm tra users.warehouse_id tồn tại — Lead chọn FK rebuild hay service check); README.md/docs/SETUP.md cập nhật endpoint kho, khớp lệnh đã chạy thật. Không có file .github/workflows/ trong repo. Không claim VPS, không claim deploy production (local-only, D9).",
+      "disposition": "acceptance"
+    },
+    {
+      "id": "R-19",
+      "sourceSpan": "dòng 329",
+      "text": "Đơn hàng (GOAL-005): không có luồng giữ hàng tự động khi tạo đơn, không có commit giữ hàng → xuất kho khi giao hàng, không có giải phóng giữ hàng tự động khi hủy đơn — các API reserve/release ở goal này là thao tác trực tiếp, GOAL-005 sẽ gọi chúng.",
+      "disposition": "excluded",
+      "exclusion": {
+        "kind": "deferred",
+        "to": "GOAL-005"
+      },
+      "exclusionReason": "Ngoài phạm vi GOAL-004 theo brief — thuộc GOAL-005"
+    },
+    {
+      "id": "R-20",
+      "sourceSpan": "dòng 333",
+      "text": "Thanh toán/hoàn tiền (GOAL-006), giao hàng/trả hàng (GOAL-007), khuyến mãi (GOAL-009): không mã giảm giá, không đối soát kho–đơn–thanh toán, không trả hàng nhập lại kho.",
+      "disposition": "excluded",
+      "exclusion": {
+        "kind": "deferred",
+        "to": "GOAL-006"
+      },
+      "exclusionReason": "Ngoài phạm vi GOAL-004 theo brief — thuộc GOAL-006/007/009"
+    },
+    {
+      "id": "R-21",
+      "sourceSpan": "dòng 336",
+      "text": "Đa chi nhánh cho 1 user (bảng user_scopes), ngưỡng tồn thấp riêng theo kho, cảnh báo qua email/thông báo (GOAL-011), upload ảnh thật, quên mật khẩu / đặt lại mật khẩu qua email, SSO/OAuth — là follow-up, không làm trong goal này.",
+      "disposition": "excluded",
+      "exclusion": {
+        "kind": "out-of-scope"
+      },
+      "exclusionReason": "Ngoài phạm vi GOAL-004 theo brief"
+    },
+    {
+      "id": "R-22",
+      "sourceSpan": "dòng 340",
+      "text": "Deploy production/VPS (ngoài phạm vi, local-only), CI workflow (chờ user cấp scope workflow).",
+      "disposition": "excluded",
+      "exclusion": {
+        "kind": "out-of-scope"
+      },
+      "exclusionReason": "Ngoài phạm vi GOAL-004 theo brief"
+    }
+  ],
+  "scope": [
+    "docs/",
+    "src/",
+    "scripts/",
+    "tests/",
+    "package.json",
+    "package-lock.json",
+    "README.md",
+    "brief-004.md",
+    "goal-004.json",
+    ".gitignore"
+  ],
+  "exclusions": [
+    "Don hang (GOAL-005): khong co luong giu hang tu dong khi tao don, khong co commit giu hang -> xuat kho khi giao hang, khong co giai phong giu hang tu dong khi huy don — API reserve/release o goal nay la thao tac truc tiep, GOAL-005 se goi chung",
+    "Thanh toan/hoan tien (GOAL-006), giao hang/tra hang (GOAL-007), khuyen mai (GOAL-009) — khong doi soat kho–don–thanh toan, khong tra hang nhap lai kho",
+    "Da chi nhanh cho 1 user (bang user_scopes), nguong ton thap rieng theo kho, canh bao qua email/thong bao (GOAL-011), upload anh that, quen mat khau / dat lai mat khau qua email, SSO/OAuth",
+    "Deploy production/VPS (ngoai pham vi, local-only), CI workflow (cho user cap scope workflow)"
+  ],
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "text": "Kho + luoc do ton (AC-1): migration 009 tao warehouses (org_id, ten bat buoc, branch_id optional chi de hien thi, status active/inactive), stock_levels (ton theo bien the, UNIQUE org/warehouse/variant, CHECK reserved <= on_hand, available tinh duoc), stock_movements append-only (type in/out/adjust/count/transfer_in/transfer_out/reserve/release, qty_change + reserved_change, on_hand_after/reserved_after, reason bat buoc, reference, actor); CRUD kho, khong xoa cung",
+      "requirementIds": [
+        "R-1",
+        "R-2",
+        "R-3",
+        "R-4"
+      ],
+      "examples": [
+        {
+          "input": "mo DB moi, chay migration 001-009 roi seed",
+          "expected": "migration 009 tao warehouses/stock_levels/stock_movements; UNIQUE bat trung dong ton cung (warehouse, variant)"
+        },
+        {
+          "input": "tao kho roi sua, goi DELETE kho",
+          "expected": "POST /api/warehouses tao kho 201 (chi owner; manager -> 403); PATCH doi ten/status; khong co DELETE kho"
+        },
+        {
+          "input": "tao san pham khong bien the roi POST /api/stock/in",
+          "expected": "nhap kho san pham chua co bien the -> 400; ton cua bien the ngoai org -> 403/404"
+        }
+      ],
+      "boundaries": [
+        "kho la cap org (khong gan bat buoc vao chi nhanh); branch_id chi de hien thi, khong gate quyen",
+        "ton theo bien the (khong co dong ton cap san pham); san pham chua co bien the thi khong nhap kho duoc",
+        "CHECK (reserved <= on_hand) o tang DB; khong co endpoint DELETE kho",
+        "stock_movements chi INSERT, khong co API UPDATE/DELETE lich su"
+      ],
+      "prohibited": [
+        "khong duoc gan branch_id bat buoc cho bang warehouses",
+        "khong duoc tao dong ton cap san pham (khong co variant_id)",
+        "khong duoc them endpoint DELETE (xoa cung) kho",
+        "khong duoc cho API sua/xoa lich su bien dong ton"
+      ],
+      "checkIds": [
+        "CHK-1",
+        "CHK-2"
+      ]
+    },
+    {
+      "id": "AC-2",
+      "text": "Nhap/xuat/dieu chinh/kiem ke/chuyen/giu/giai phong + doc ton (AC-2): API nhap/xuat (qty nguyen > 0, reason bat buoc, xuat <= available), dieu chinh theo delta, kiem ke dat tuyet doi, chuyen kho nguyen tu 1 transaction (2 movement transfer_out/transfer_in), giu/giai phong chi doi reserved, API doc levels/movements/low-stock kem co low_stock",
+      "requirementIds": [
+        "R-5",
+        "R-6",
+        "R-7",
+        "R-8",
+        "R-9"
+      ],
+      "examples": [
+        {
+          "input": "POST /api/stock/in, /reserve, /out vuot available",
+          "expected": "nhap 50 -> on_hand 50, available 50; giu 10 -> reserved 10, available 40; xuat 45 -> 400 insufficient_stock, khong ghi movement"
+        },
+        {
+          "input": "POST /api/stock/transfer du/thieu ton kho nguon",
+          "expected": "chuyen 20 tu kho A sang kho B: A giam 20 (transfer_out), B tang 20 (transfer_in) trong 1 transaction; kho nguon khong du -> kho dich khong doi"
+        },
+        {
+          "input": "POST /api/stock/count sau khi giu hang",
+          "expected": "kiem ke counted_qty=30 khi on_hand=50 -> movement count qty_change=-20, on_hand=30; counted_qty < reserved -> 400"
+        }
+      ],
+      "boundaries": [
+        "qty phai la so nguyen > 0 (xuat/chuyen/giu); qty_change dieu chinh la so nguyen khac 0; counted_qty >= 0",
+        "xuat/chuyen/giu yeu cau qty <= available, vi pham -> 400 insufficient_stock, khong ghi movement",
+        "dieu chinh/kiem ke khong duoc lam on_hand < reserved; reason bat buoc",
+        "xuat kho KHONG tru reserved; hang da giu chi xuat qua luong don GOAL-005",
+        "bien the cua san pham da ngung kinh doanh van nhap/xuat duoc"
+      ],
+      "prohibited": [
+        "khong duoc cho xuat/chuyen/giu vuot available",
+        "khong duoc de dieu chinh/kiem ke lam on_hand < reserved hoac am",
+        "khong duoc ghi movement khi thao tac that bai (400)",
+        "khong duoc de chuyen kho ghi 1 nua (chi tru nguon hoac chi cong dich)"
+      ],
+      "checkIds": [
+        "CHK-1",
+        "CHK-2"
+      ]
+    },
+    {
+      "id": "AC-3",
+      "text": "Idempotency + chong race + ton thap (AC-3): idempotency key cho moi thao tac ton (ten mien stock:<loai>:<key>, replay tra response cu kem replayed: true, kiem tra + thuc thi + ghi key trong 1 transaction BEGIN IMMEDIATE), moi bien dong trong BEGIN IMMEDIATE + CHECK o DB, test dong thoi chung minh tong xuat <= available va ton khong am, canh bao ton thap theo products.min_stock theo cap (bien the, kho)",
+      "requirementIds": [
+        "R-10",
+        "R-11",
+        "R-12"
+      ],
+      "examples": [
+        {
+          "input": "POST /api/stock/in 2 lan cung key",
+          "expected": "gui lai POST /api/stock/in cung Idempotency-Key -> replayed: true, on_hand va so movement khong doi"
+        },
+        {
+          "input": "gui dong thoi N POST /api/stock/out",
+          "expected": "10 yeu cau xuat 10 dong thoi khi available=50: tong xuat thanh cong <= 50, ton cuoi khong am, yeu cau vuot nhan 400"
+        },
+        {
+          "input": "nhap it hon min_stock roi GET /api/stock/low-stock",
+          "expected": "GET /api/stock/low-stock tra dung cac cap (bien the, kho) co available < min_stock kem min_stock va available"
+        }
+      ],
+      "boundaries": [
+        "key dat ten mien stock:<loai thao tac>:<key>; gui lai cung key + cung loai + cung org -> replayed: true, khong thuc thi lai",
+        "kiem tra key + thuc thi + ghi key trong CUNG MOT transaction BEGIN IMMEDIATE",
+        "thieu key van thuc thi (khong bat buoc), nhung khong co bao ve gui lai",
+        "nguong ton thap = products.min_stock (cap san pham), danh gia theo tung cap (bien the, kho)"
+      ],
+      "prohibited": [
+        "khong duoc dung withIdempotency hien tai mot cach ngay tho cho kho (kiem tra key ngoai transaction)",
+        "khong duoc de gui lai cung key tru kho 2 lan",
+        "khong duoc claim chong race da process (app mot tien trinh, D1)"
+      ],
+      "checkIds": [
+        "CHK-1",
+        "CHK-2"
+      ]
+    },
+    {
+      "id": "AC-4",
+      "text": "RBAC + audit + checks mo rong xanh (AC-4): mo rong can() voi 11 actions kho theo ma tran (vai sai -> 403, ngoai org -> 403, sai kho duoc gan -> 403, chuyen kho khi 1 trong 2 kho ngoai pham vi -> 403), kiem tra users.warehouse_id ton tai khi gan qua PATCH scope, audit_log moi thao tac kho, test 403 theo ma tran, du lieu gia lap, check.sh/demo.sh mo rong buoc kho va giu cac buoc GOAL-001/002/003 xanh, docs RBAC/D17/D18, khong co workflow CI/VPS",
+      "requirementIds": [
+        "R-13",
+        "R-14",
+        "R-15",
+        "R-16",
+        "R-17",
+        "R-18"
+      ],
+      "examples": [
+        {
+          "input": "goi tung endpoint cam theo tung vai/kho",
+          "expected": "sales nhap kho bi 403; accountant xuat kho bi 403; warehouse nhap kho ngoai kho duoc gan bi 403; manager tao kho bi 403"
+        },
+        {
+          "input": "thuc hien cac thao tac roi doc GET /api/audit-log",
+          "expected": "sau nhap/xuat/chuyen/giu, audit_log co ban ghi voi actor, created_at, action, detail target_warehouse_id/target_variant_id + before/after"
+        },
+        {
+          "input": "./scripts/check.sh; ./scripts/demo.sh",
+          "expected": "./scripts/check.sh exit 0 va ./scripts/demo.sh in PASS tung buoc, gom buoc kho moi"
+        },
+        {
+          "input": "./scripts/check.sh buoc secret-scan",
+          "expected": "grep khong thay credential that trong code (tru placeholder/fixture gia)"
+        }
+      ],
+      "boundaries": [
+        "test moi them vao file test moi, KHONG sua 83 test da khoa cua GOAL-001/002/003",
+        "du lieu test la gia lap (2 org, 2 kho tro len trong cung org, 2 bien the tro len)",
+        "kho la cap org: pham vi chi nhanh KHONG gate thao tac kho; pham vi kho gate bang users.warehouse_id",
+        "audit_log va stock_movements la 2 lop ghi nhan khac nhau, ca hai deu phai co"
+      ],
+      "prohibited": [
+        "khong duoc sua 83 test da khoa cua GOAL-001/002/003",
+        "khong duoc commit bi mat/credential that",
+        "khong duoc claim CI/VPS/deploy khi chua co",
+        "khong duoc de endpoint kho nao bo qua kiem tra vai + pham vi kho",
+        "khong duoc dung audit_log thay cho stock_movements hoac nguoc lai"
+      ],
+      "checkIds": [
+        "CHK-1",
+        "CHK-2"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "CHK-1",
+      "kind": "command",
+      "command": "./scripts/check.sh",
+      "expect": "pass",
+      "runs": 1,
+      "timeoutMs": 600000,
+      "env": {}
+    },
+    {
+      "id": "CHK-2",
+      "kind": "command",
+      "command": "./scripts/demo.sh",
+      "expect": "pass",
+      "runs": 1,
+      "timeoutMs": 600000,
+      "env": {}
+    }
+  ],
+  "dependencies": [
+    "GOAL-001",
+    "GOAL-002",
+    "GOAL-003"
+  ],
+  "priority": 3
+}
+```
