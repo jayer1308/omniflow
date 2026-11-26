@@ -1,6 +1,6 @@
 # GOAL-002 v1: OmniFlow RBAC: 5 vai owner/manager/sales/warehouse/accountant voi ma tran quyen vai x thao tac x pham vi (docs/RBAC.md); moi/khoa/thu hoi nhan vien, khoa vo hieu session ngay, thu hoi la cuoi cung; doi vai/pham vi/mat khau theo ma tran; quan ly chi nhanh; audit_log thao tac nhay cam co API/trang xem trong org; test 403 ngoai org/ngoai branch/sai vai; check/demo mo rong buoc RBAC van xanh
 
-Status: verified
+Status: closed
 
 ```json
 {
