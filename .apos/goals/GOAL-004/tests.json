@@ -1,0 +1,66 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/stock-acceptance.test.ts::AC-1 migration 009 tao du 3 bang kho + cot + UNIQUE/CHECK",
+      "tests/stock-acceptance.test.ts::AC-1 tao kho 201 chi owner, manager/warehouse/sales/accountant tao kho bi 403",
+      "tests/stock-acceptance.test.ts::AC-1 tao kho ten rong bi 400; GET list loc status/branch_id; GET chi tiet",
+      "tests/stock-acceptance.test.ts::AC-1 PATCH doi ten/status chi owner; manager PATCH bi 403; kho inactive van doc duoc",
+      "tests/stock-acceptance.test.ts::AC-1 khong co endpoint DELETE kho: DELETE tra 404/405 va kho van doc duoc",
+      "tests/stock-acceptance.test.ts::AC-1 nhap kho san pham chua co bien the: thieu variant_id bi 400, variant_id khong ton tai bi 404",
+      "tests/stock-acceptance.test.ts::AC-1 ton bien the ngoai org bi 403/404; ownerB xem levels khong thay org A",
+      "tests/stock-acceptance.test.ts::AC-1 stock_movements append-only: PATCH/DELETE lich su tra 404/405 va lich su van nguyen"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/stock-acceptance.test.ts::AC-2 nhap kho dung so hoc: in 50 -> on_hand 50, available 50, movement in",
+      "tests/stock-acceptance.test.ts::AC-2 xuat kho dung so hoc va xuat khong tru reserved: in 50, giu 10, xuat 20",
+      "tests/stock-acceptance.test.ts::AC-2 xuat qua available bi 400 insufficient_stock va KHONG ghi movement",
+      "tests/stock-acceptance.test.ts::AC-2 nhap/xuat sai du lieu bi 400: qty 0/am/khong nguyen, thieu reason, kho/bien the khong ton tai",
+      "tests/stock-acceptance.test.ts::AC-2 bien the san pham ngung kinh doanh van nhap/xuat duoc",
+      "tests/stock-acceptance.test.ts::AC-2 giu/giai phong dung so hoc: reserve/release, vuot available/reserved bi 400, reference luu lai",
+      "tests/stock-acceptance.test.ts::AC-2 dieu chinh dung so hoc + ly do bat buoc; adjust 0 hoac lam on_hand < reserved bi 400, khong ghi movement",
+      "tests/stock-acceptance.test.ts::AC-2 kiem ke dat tuyet doi: count 30 khi on_hand 50, movement count qty_change -20; counted_qty < reserved bi 400",
+      "tests/stock-acceptance.test.ts::AC-2 chuyen kho thanh cong nguyen tu: 2 movement transfer_out/transfer_in dung so hoc",
+      "tests/stock-acceptance.test.ts::AC-2 chuyen kho nguon khong du bi 400 insufficient_stock, kho dich khong doi; hai kho giong nhau bi 400",
+      "tests/stock-acceptance.test.ts::AC-2 doc levels: loc warehouse/variant/low_stock, kem product_id/sku/available/low_stock, phan trang",
+      "tests/stock-acceptance.test.ts::AC-2 doc movements: moi nhat truoc, loc type/warehouse/variant, kem on_hand_after/reserved_after/reason/reference/actor_id",
+      "tests/stock-acceptance.test.ts::AC-2 stockLevel/applyMovement truc tiep dung so hoc (src/stock.ts)"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/stock-acceptance.test.ts::AC-3 idempotency in gui lai cung Idempotency-Key: replayed true, ton + movement khong doi",
+      "tests/stock-acceptance.test.ts::AC-3 idempotency key khac nhau thi thuc thi; thieu key van thuc thi; cung key khac loai khong va nhau",
+      "tests/stock-acceptance.test.ts::AC-3 idempotency dong thoi cung key: chi 1 lan thuc thi",
+      "tests/stock-acceptance.test.ts::AC-3 race xuat dong thoi: 10 yeu cau xuat 10 khi available 50, tong xuat <= 50, ton khong am",
+      "tests/stock-acceptance.test.ts::AC-3 ton thap dung cap theo min_stock: low-stock tra dung cap kem min_stock/available; levels kem co low_stock",
+      "tests/stock-acceptance.test.ts::AC-3 withStockIdempotency truc tiep: gui lai cung key khong thuc thi lai (src/stock.ts)"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/stock-acceptance.test.ts::AC-4 can() cho phep dung vai dung pham vi kho voi 11 actions moi",
+      "tests/stock-acceptance.test.ts::AC-4 RBAC 403 qua HTTP: sales nhap kho, accountant xuat kho, manager/warehouse/accountant tao kho",
+      "tests/stock-acceptance.test.ts::AC-4 warehouse chi thao tac kho duoc gan: ngoai kho gan bi 403, trong kho gan duoc; warehouse_id NULL duoc moi kho",
+      "tests/stock-acceptance.test.ts::AC-4 chuyen kho khi 1 trong 2 kho ngoai pham vi bi 403; warehouse xem levels/movements chi kho duoc gan",
+      "tests/stock-acceptance.test.ts::AC-4 sales xem movements/low-stock bi 403, accountant xem duoc; sales xem levels duoc",
+      "tests/stock-acceptance.test.ts::AC-4 org A tren org B bi 403: ownerB doc/sua kho org A, nhap kho org A, xem levels org A",
+      "tests/stock-acceptance.test.ts::AC-4 gan warehouse_id qua PATCH scope: kho khong ton tai bi 400/403, kho ngoai org bi 400/403, kho hop le duoc",
+      "tests/stock-acceptance.test.ts::AC-4 audit log ghi tao/sua kho + nhap/xuat/chuyen/giu voi actor, target_warehouse_id/target_variant_id + before/after",
+      "tests/stock-acceptance.test.ts::AC-4 kho inactive chan thao tac ton moi: in/out/adjust/chuyen vao kho inactive bi 400"
+    ]
+  }
+]

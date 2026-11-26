@@ -2063,5 +2063,31 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
+  // ---------- Kho / ton (GOAL-004) — STUB cho Tester ----------
+  // Worker thay bang logic that: hien tai moi endpoint kho tra 501
+  // "not implemented" de test acceptance DO dung ly do. Ca route DELETE
+  // kho / sua-xoa lich su cung la stub 501 (khong phai 404) de test
+  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
+  const stockNotImplemented = (_req: TenantRequest, res: Response): void => {
+    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
+  };
+  app.post('/api/warehouses', stockNotImplemented);
+  app.get('/api/warehouses', stockNotImplemented);
+  app.get('/api/warehouses/:id', stockNotImplemented);
+  app.patch('/api/warehouses/:id', stockNotImplemented);
+  app.delete('/api/warehouses/:id', stockNotImplemented);
+  app.post('/api/stock/in', stockNotImplemented);
+  app.post('/api/stock/out', stockNotImplemented);
+  app.post('/api/stock/adjust', stockNotImplemented);
+  app.post('/api/stock/count', stockNotImplemented);
+  app.post('/api/stock/transfer', stockNotImplemented);
+  app.post('/api/stock/reserve', stockNotImplemented);
+  app.post('/api/stock/release', stockNotImplemented);
+  app.get('/api/stock/levels', stockNotImplemented);
+  app.get('/api/stock/movements', stockNotImplemented);
+  app.patch('/api/stock/movements/:id', stockNotImplemented);
+  app.delete('/api/stock/movements/:id', stockNotImplemented);
+  app.get('/api/stock/low-stock', stockNotImplemented);
+
   return app;
 }
