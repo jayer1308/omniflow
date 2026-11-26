@@ -1,6 +1,6 @@
 # GOAL-003 v1: OmniFlow san pham/gia/CSV: san pham + bien the (SKU duy nhat trong org, barcode duy nhat neu co) + danh muc/thuoc tinh/anh metadata; gia chuan + gia rieng theo kenh/chi nhanh voi fallback 8 buoc + lich su gia append-only; CSV preview bao loi tung dong + import atomic toan bo hoac khong + export dung du lieu org; RBAC san pham/gia/CSV theo ma tran + audit log; check/demo mo rong buoc san pham/gia/CSV van xanh
 
-Status: approved
+Status: testing
 
 ```json
 {
