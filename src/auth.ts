@@ -10,6 +10,8 @@ export interface SessionUser {
   orgId: number;
   branchId: number | null;
   status: UserStatus;
+  /** Kho được gán (GOAL-004): NULL = làm ở mọi kho trong org. */
+  warehouseId: number | null;
 }
 
 /** Session sống 24 giờ (tính bằng giây). */
@@ -36,7 +38,8 @@ export function lookupSession(db: DatabaseSync, token: string): SessionUser | nu
   const row = db
     .prepare(
       `SELECT s.expires_at AS expiresAt, u.id AS id, u.email AS email, u.role AS role,
-              u.org_id AS orgId, u.branch_id AS branchId, u.status AS status
+              u.org_id AS orgId, u.branch_id AS branchId, u.status AS status,
+              u.warehouse_id AS warehouseId
        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
     )
     .get(token) as
@@ -48,6 +51,7 @@ export function lookupSession(db: DatabaseSync, token: string): SessionUser | nu
         orgId: number;
         branchId: number | null;
         status: UserStatus;
+        warehouseId: number | null;
       }
     | undefined;
   if (!row) return null;
@@ -62,6 +66,7 @@ export function lookupSession(db: DatabaseSync, token: string): SessionUser | nu
     orgId: row.orgId,
     branchId: row.branchId,
     status: row.status,
+    warehouseId: row.warehouseId,
   };
 }
 

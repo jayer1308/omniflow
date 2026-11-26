@@ -6,14 +6,17 @@ VÀ **phạm vi**: vai sai thao tác → 403; đúng vai sai phạm vi → 403; 
 org → 403. Helper phân quyền ở `src/rbac.ts` (`can()`), middleware
 `requireRole`/`requireScope` trong `src/app.ts`.
 
-## Mô hình phạm vi (D13)
+## Mô hình phạm vi (D13, cập nhật GOAL-004)
 
 Phạm vi = `users.branch_id` nullable + `users.warehouse_id` nullable, KHÔNG
 có bảng `user_scopes`. `branch_id NULL` = toàn bộ chi nhánh trong org; có giá
 trị = đúng 1 chi nhánh đó. Giới hạn: 1 user tối đa 1 chi nhánh trong GOAL-002
-(đa chi nhánh là Goal riêng sau). `warehouse_id` chỉ là trường chuẩn bị
-(INTEGER NULL, không FK — bảng `warehouses` là GOAL-004), phạm vi kho chỉ được
-kiểm chứng ở mức helper `can()`, chưa có endpoint nghiệp vụ kho.
+(đa chi nhánh là Goal riêng sau). `warehouse_id` từ GOAL-004 đã có ý nghĩa
+thật: `NULL` = làm ở mọi kho trong org; có giá trị = chỉ đúng kho đó.
+Gán `warehouse_id` qua `PATCH /api/users/:id/scope` được kiểm tra ở tầng
+service (D18): kho không tồn tại → 400, kho ngoài org → 403. Kho là cấp org
+nên phạm vi chi nhánh KHÔNG gate thao tác kho; phạm vi kho gate bằng
+`users.warehouse_id` (xem ma trận kho ở dưới).
 
 - Email duy nhất trong TOÀN hệ thống (D14), giữ `UNIQUE` trên `users.email`.
 - `users.status` có 3 giá trị: `active` (mặc định) / `locked` (khóa tạm thời,
@@ -76,6 +79,69 @@ nội bộ cho việc xem giá riêng từng chi nhánh).
   **403**, và `GET /api/products/:id/prices` tự lọc bỏ giá chi nhánh khác.
 - Đổi giá riêng theo chi nhánh (owner/manager) không bị giới hạn chi nhánh:
   quản lý đặt được giá mọi chi nhánh trong org.
+
+## Ma trận quyền kho / tồn (GOAL-004, D17)
+
+Kho là dữ liệu **cấp org** (D17): một kho phục vụ cả doanh nghiệp,
+`branch_id` trên kho chỉ để hiển thị, không gate quyền. Phạm vi kho gate
+bằng `users.warehouse_id` (`NULL` = mọi kho trong org). Helper `can()` mở
+rộng 11 actions: `create-warehouse`, `manage-warehouse`, `stock-in`,
+`stock-out`, `stock-adjust`, `stock-count`, `stock-transfer`, `stock-reserve`,
+`stock-release`, `view-stock`, `view-stock-movements`; kiểu `Target` mở rộng
+thêm `warehouseId`. Mọi endpoint kho qua `requireAuth` + `can()`.
+
+| Thao tác | owner | manager | warehouse | sales / accountant |
+|---|---|---|---|---|
+| Tạo kho (`POST /api/warehouses`) | Được | Không (403) | Không (403) | Không (403) |
+| Sửa kho: đổi tên / active-inactive (`PATCH /api/warehouses/:id`) | Được | Không (403) | Không (403) | Không (403) |
+| Xem danh sách/chi tiết kho (`GET /api/warehouses...`) | Được, toàn org | Được, toàn org | Được, toàn org | Được, toàn org |
+| Nhập kho (`POST /api/stock/in`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán (`warehouse_id` NULL = mọi kho) | Không (403) |
+| Xuất kho (`POST /api/stock/out`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán | Không (403) |
+| Điều chỉnh tồn (`POST /api/stock/adjust`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán | Không (403) |
+| Kiểm kê (`POST /api/stock/count`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán | Không (403) |
+| Chuyển kho (`POST /api/stock/transfer`) | Được, mọi kho | Được, mọi kho | Được, chỉ khi CẢ kho nguồn VÀ kho đích đều trong phạm vi của mình | Không (403) |
+| Giữ hàng (`POST /api/stock/reserve`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán | Không (403) |
+| Giải phóng giữ hàng (`POST /api/stock/release`) | Được, mọi kho | Được, mọi kho | Được, chỉ kho được gán | Không (403) |
+| Xem mức tồn (`GET /api/stock/levels`) | Được, toàn org | Được, toàn org | Được, chỉ kho được gán (NULL = mọi kho) | Được, toàn org (chỉ xem, để bán hàng/đối soát) |
+| Xem lịch sử biến động (`GET /api/stock/movements`) | Được, toàn org | Được, toàn org | Được, chỉ kho được gán | `accountant` được; `sales` không (403) |
+| Xem tồn thấp (`GET /api/stock/low-stock`) | Được, toàn org | Được, toàn org | Được, chỉ kho được gán | `accountant` được; `sales` không (403) |
+
+Lưu ý:
+
+- Kho `inactive` vẫn đọc được (chi tiết + lịch sử) nhưng thao tác tồn mới
+  → 400. Không có endpoint DELETE kho; không có API sửa/xóa lịch sử biến
+  động (gọi → 404).
+- Xuất/chuyển/giữ yêu cầu `qty <= available` (`available = on_hand -
+  reserved`), vi phạm → 400 `insufficient_stock`, không ghi movement.
+  Xuất kho không trừ `reserved` (hàng đã giữ chỉ xuất qua luồng đơn
+  GOAL-005). Biến thể của sản phẩm đã ngừng kinh doanh vẫn nhập/xuất được.
+- Ngưỡng tồn thấp = `products.min_stock` (cấp sản phẩm), đánh giá theo từng
+  cặp (biến thể, kho). Giữ hàng rồi không giải phóng thì `available` thấp
+  mãi — hành vi đúng trong goal này (GOAL-005 mới giải phóng khi hủy đơn).
+- Idempotency: header `Idempotency-Key` hoặc trường `idempotency_key`
+  trong body; tên miền key `stock:<loại thao tác>:<key>`; gửi lại trả đúng
+  response cũ kèm `replayed: true`. Thiếu key vẫn thực thi (không bắt buộc)
+  nhưng không có bảo vệ gửi lại.
+
+### Endpoints mới (GOAL-004)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/warehouses`, `PATCH /api/warehouses/:id` | chỉ owner |
+| `GET /api/warehouses`, `GET /api/warehouses/:id` | mọi vai (lọc theo org) |
+| `POST /api/stock/in`, `/out`, `/adjust`, `/count`, `/transfer`, `/reserve`, `/release` | owner / manager (mọi kho); warehouse (chỉ kho được gán); sales / accountant → 403 |
+| `GET /api/stock/levels` | mọi vai (warehouse chỉ thấy kho được gán) |
+| `GET /api/stock/movements`, `GET /api/stock/low-stock` | owner / manager / accountant / warehouse (chỉ kho được gán); sales → 403 |
+
+Audit log: mọi thao tác tạo/sửa kho, nhập/xuất/điều chỉnh/kiểm kê/chuyển/
+giữ/giải phóng đều ghi `audit_log` (`action` chứa `stock`/`warehouse` +
+`detail` JSON với `target_warehouse_id`, `target_variant_id` và
+`before`/`after` có `on_hand`/`reserved`). Xem log theo luật GOAL-002
+(`owner` toàn org, `manager` trong phạm vi + do mình làm — với bản ghi
+không gắn `target_user_id` thì xét người thực hiện có trong phạm vi chi
+nhánh của manager không; các vai khác → 403). `stock_movements` là lịch sử
+chi tiết, `audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai đều phải
+có, không thay nhau.
 
 ### Endpoints mới (GOAL-003)
 

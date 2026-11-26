@@ -20,6 +20,8 @@ export interface Actor {
   branchId: number | null;
   role: Role;
   status?: UserStatus;
+  /** Kho được gán (GOAL-004): NULL = làm ở mọi kho trong org. */
+  warehouseId?: number | null;
 }
 
 export interface Target {
@@ -27,6 +29,8 @@ export interface Target {
   orgId: number;
   branchId?: number | null;
   role?: Role;
+  /** Kho mục tiêu (GOAL-004): kiểm tra phạm vi kho của vai warehouse. */
+  warehouseId?: number | null;
 }
 
 export type Action =
@@ -52,7 +56,20 @@ export type Action =
   // Xem giá riêng của đúng một chi nhánh (dùng cho GET /price + lọc
   // GET /prices): owner/manager xem mọi chi nhánh, vai còn lại chỉ xem
   // chi nhánh của mình (inScope).
-  | 'view-branch-price';
+  | 'view-branch-price'
+  // GOAL-004: kho / tồn (xem docs/RBAC.md, ma trận kho). Phạm vi kho gate
+  // bằng users.warehouse_id: NULL = mọi kho trong org.
+  | 'create-warehouse'
+  | 'manage-warehouse'
+  | 'stock-in'
+  | 'stock-out'
+  | 'stock-adjust'
+  | 'stock-count'
+  | 'stock-transfer'
+  | 'stock-reserve'
+  | 'stock-release'
+  | 'view-stock'
+  | 'view-stock-movements';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -143,7 +160,55 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       if (actor.role === 'owner' || actor.role === 'manager') return true;
       if (targetBranch === null) return true;
       return inScope(actor.branchId, targetBranch);
+    // GOAL-004: ma trận kho (docs/RBAC.md). Kho là cấp org nên phạm vi chi
+    // nhánh KHÔNG gate thao tác kho; phạm vi kho gate bằng warehouse_id.
+    // target.warehouseId không nêu = chưa chỉ kho cụ thể: vai warehouse
+    // được phép ở mức "xem/thao tác" nhưng route phải lọc về kho được gán
+    // (warehouse_id NULL = mọi kho; có giá trị = chỉ đúng kho đó).
+    case 'create-warehouse':
+    case 'manage-warehouse':
+      return actor.role === 'owner';
+    case 'stock-in':
+    case 'stock-out':
+    case 'stock-adjust':
+    case 'stock-count':
+    case 'stock-transfer':
+    case 'stock-reserve':
+    case 'stock-release': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'warehouse') return false;
+      return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+    }
+    case 'view-stock':
+      // Mọi vai đều xem được mức tồn (sales xem để bán hàng, accountant xem
+      // để đối soát); vai warehouse chỉ thấy kho được gán (target có kho cụ
+      // thể thì gate; chưa chỉ kho thì route tự lọc về kho được gán).
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return true;
+    case 'view-stock-movements':
+      if (actor.role === 'sales') return false;
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant';
     default:
       return false;
   }
+}
+
+/**
+ * true khi kho mục tiêu nằm trong phạm vi kho của actor.
+ * actorWarehouseId NULL = làm ở mọi kho trong org; ngược lại target phải
+ * đúng kho đó. targetWarehouseId NULL/undefined = chưa chỉ kho cụ thể
+ * (route đọc sẽ tự lọc về kho được gán) nên cho qua ở mức can().
+ */
+export function inWarehouseScope(
+  actorWarehouseId: number | null,
+  targetWarehouseId: number | null | undefined,
+): boolean {
+  if (actorWarehouseId === null) return true;
+  if (targetWarehouseId === null || targetWarehouseId === undefined) return true;
+  return targetWarehouseId === actorWarehouseId;
 }

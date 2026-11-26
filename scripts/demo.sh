@@ -140,6 +140,9 @@ WH_PASS="$(node -e "console.log(require('crypto').randomBytes(12).toString('base
 WH_COOKIE="$TMPDIR_DEMO/wh-cookie.txt"
 BRANCH2_FILE="$TMPDIR_DEMO/branch2.txt"
 PROD_FILE="$TMPDIR_DEMO/prod.txt"
+VAR_FILE="$TMPDIR_DEMO/var.txt"
+WHA_FILE="$TMPDIR_DEMO/wha.txt"
+WHB_FILE="$TMPDIR_DEMO/whb.txt"
 
 san_pham_setup() {
   local res
@@ -156,7 +159,7 @@ san_pham_setup() {
 demo_step "san-pham: tao chi nhanh 2, moi warehouse, dang nhap duoc" san_pham_setup
 
 san_pham_tao() {
-  local res dup
+  local res dup vres
   res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
     -d '{"code":"SP-DEMO","name":"San pham demo","price":100000,"unit":"cai"}' \
     "http://127.0.0.1:$PORT_DEMO/api/products")"
@@ -164,9 +167,11 @@ san_pham_tao() {
   echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$PROD_FILE"
   local id
   id="$(cat "$PROD_FILE")"
-  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+  vres="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
     -d '{"sku":"SKU-DEMO","name":"Bien the demo"}' \
-    "http://127.0.0.1:$PORT_DEMO/api/products/$id/variants" | grep -q '"sku":"SKU-DEMO"' || return 1
+    "http://127.0.0.1:$PORT_DEMO/api/products/$id/variants")"
+  echo "$vres" | grep -q '"sku":"SKU-DEMO"' || { echo "tao bien the tra ve: $vres"; return 1; }
+  echo "$vres" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})" > "$VAR_FILE"
   dup="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
     -d '{"sku":"SKU-DEMO","name":"Trung SKU"}' \
     "http://127.0.0.1:$PORT_DEMO/api/products/$id/variants")"
@@ -225,6 +230,167 @@ san_pham_rbac() {
   [ "$code" = "403" ] || { echo "warehouse tao san pham tra ve HTTP $code, mong 403"; return 1; }
 }
 demo_step "san-pham: sales doi gia bi 403, warehouse tao san pham bi 403" san_pham_rbac
+
+# Kho / ton (GOAL-004): tao kho -> nhap -> xuat -> xuat qua ton 400 -> giu
+# -> giai phong -> chuyen kho -> kiem ke -> ton thap -> idempotency gui lai
+# -> race dong thoi -> RBAC 403 (sales nhap, warehouse ngoai pham vi, ngoai org).
+
+kho_tao() {
+  local wha whb
+  wha="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho A demo"}' "http://127.0.0.1:$PORT_DEMO/api/warehouses")"
+  echo "$wha" | grep -q '"name":"Kho A demo"' || { echo "tao kho A tra ve: $wha"; return 1; }
+  echo "$wha" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$WHA_FILE"
+  whb="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho B demo"}' "http://127.0.0.1:$PORT_DEMO/api/warehouses")"
+  echo "$whb" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$WHB_FILE"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho sales tao"}' "http://127.0.0.1:$PORT_DEMO/api/warehouses")" = "403" ] || return 1
+}
+demo_step "kho: owner tao 2 kho, sales tao kho bi 403" kho_tao
+
+kho_nhap_xuat() {
+  local wha var in_res out_res over
+  wha="$(cat "$WHA_FILE")"
+  var="$(cat "$VAR_FILE")"
+  in_res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":50,\"reason\":\"nhap demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  echo "$in_res" | grep -q '"on_hand":50' || { echo "nhap kho tra ve: $in_res"; return 1; }
+  echo "$in_res" | grep -q '"available":50' || { echo "nhap kho available sai: $in_res"; return 1; }
+  out_res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":20,\"reason\":\"xuat demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/out")"
+  echo "$out_res" | grep -q '"on_hand":30' || { echo "xuat kho tra ve: $out_res"; return 1; }
+  over="$(curl -s -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":40,\"reason\":\"xuat qua ton\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/out")"
+  echo "$over" | grep -q 'insufficient_stock' || { echo "xuat qua ton thieu ma loi: $over"; return 1; }
+}
+demo_step "kho: nhap 50 -> xuat 20 con 30, xuat qua ton bi 400 insufficient_stock" kho_nhap_xuat
+
+kho_giu_chuyen_kiemke() {
+  local wha whb var res rel tr lvl cnt
+  wha="$(cat "$WHA_FILE")"
+  whb="$(cat "$WHB_FILE")"
+  var="$(cat "$VAR_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":10,\"reason\":\"giu demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/reserve")"
+  echo "$res" | grep -q '"reserved":10' || { echo "giu hang tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"available":20' || { echo "giu hang available sai: $res"; return 1; }
+  rel="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":4,\"reason\":\"giai phong demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/release")"
+  echo "$rel" | grep -q '"reserved":6' || { echo "giai phong tra ve: $rel"; return 1; }
+  tr="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"from_warehouse_id\":$wha,\"to_warehouse_id\":$whb,\"variant_id\":$var,\"qty\":5,\"reason\":\"chuyen demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/transfer")"
+  echo "$tr" | grep -q '"on_hand":25' || { echo "chuyen kho tra ve: $tr"; return 1; }
+  lvl="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/levels?warehouse_id=$whb&variant_id=$var")"
+  echo "$lvl" | grep -q '"on_hand":5' || { echo "kho dich sau chuyen: $lvl"; return 1; }
+  cnt="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb,\"variant_id\":$var,\"counted_qty\":8,\"reason\":\"kiem ke demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/count")"
+  echo "$cnt" | grep -q '"on_hand":8' || { echo "kiem ke tra ve: $cnt"; return 1; }
+}
+demo_step "kho: giu 10 -> giai phong 4, chuyen 5 sang kho B, kiem ke kho B ve 8" kho_giu_chuyen_kiemke
+
+kho_ton_thap() {
+  local low
+  low="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/low-stock")"
+  echo "$low" | grep -q '"sku":"SKU-SEED-01-M"' || { echo "ton thap thieu cap seed: $low"; return 1; }
+}
+demo_step "kho: ton thap liet ke dung cap seed (Kho Chinh 3 < min_stock 5)" kho_ton_thap
+
+kho_idempotency() {
+  local whb var first second lvl
+  whb="$(cat "$WHB_FILE")"
+  var="$(cat "$VAR_FILE")"
+  first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-stock-1' -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb,\"variant_id\":$var,\"qty\":5,\"reason\":\"nhap idem\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  echo "$first" | grep -q '"on_hand":13' || { echo "nhap idem lan 1 tra ve: $first"; return 1; }
+  second="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-stock-1' -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb,\"variant_id\":$var,\"qty\":5,\"reason\":\"nhap idem\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  echo "$second" | grep -q '"replayed":true' || { echo "gui lai khong replay: $second"; return 1; }
+  lvl="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/levels?warehouse_id=$whb&variant_id=$var")"
+  echo "$lvl" | grep -q '"on_hand":13' || { echo "gui lai van tru them: $lvl"; return 1; }
+}
+demo_step "kho: gui lai cung idempotency key tra replayed, khong tru 2 lan" kho_idempotency
+
+kho_race() {
+  local wha var i ok fail lvl pids
+  wha="$(cat "$WHA_FILE")"
+  var="$(cat "$VAR_FILE")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":6,\"reason\":\"giai phong het\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/release" >/dev/null
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"counted_qty\":50,\"reason\":\"kiem ke ve 50\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/count" >/dev/null
+  # Chi wait cac job race: server demo cung la job nen cua shell nay, wait
+  # tran se doi ca server (chay mai) nen treo. Gom PID roi wait rieng.
+  pids=()
+  for i in $(seq 1 10); do
+    ( curl -s -o /dev/null -w '%{http_code}\n' -b "$COOKIE" -H 'Content-Type: application/json' \
+      -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":10,\"reason\":\"xuat race\"}" \
+      "http://127.0.0.1:$PORT_DEMO/api/stock/out" > "$TMPDIR_DEMO/race-$i.code" ) &
+    pids+=($!)
+  done
+  wait "${pids[@]}"
+  ok="$(cat "$TMPDIR_DEMO"/race-*.code | grep -c '^200$' || true)"
+  fail="$(cat "$TMPDIR_DEMO"/race-*.code | grep -c '^400$' || true)"
+  [ "$ok" = "5" ] || { echo "race: $ok yeu cau thanh cong, mong 5"; return 1; }
+  [ "$fail" = "5" ] || { echo "race: $fail yeu cau bi 400, mong 5"; return 1; }
+  lvl="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/levels?warehouse_id=$wha&variant_id=$var")"
+  echo "$lvl" | grep -q '"on_hand":0' || { echo "ton cuoi sau race: $lvl"; return 1; }
+}
+demo_step "kho: 10 yeu cau xuat 10 dong thoi khi available 50 -> 5 thanh cong, 5 bi 400, ton cuoi 0" kho_race
+
+kho_rbac() {
+  local wha whb var code wh2_pass wh2_res wh2_id wh2_cookie orgb_id whb_org_id attempt
+  wha="$(cat "$WHA_FILE")"
+  whb="$(cat "$WHB_FILE")"
+  var="$(cat "$VAR_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":1,\"reason\":\"sales nhap\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  [ "$code" = "403" ] || { echo "sales nhap kho tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/movements")"
+  [ "$code" = "403" ] || { echo "sales xem movements tra ve HTTP $code, mong 403"; return 1; }
+  wh2_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  wh2_res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-scope-demo@example.local\",\"password\":\"$wh2_pass\",\"role\":\"warehouse\",\"branch_id\":1}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite")"
+  wh2_id="$(echo "$wh2_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")"
+  curl -fsS -X PATCH -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/$wh2_id/scope" >/dev/null
+  wh2_cookie="$TMPDIR_DEMO/wh2-cookie.txt"
+  curl -fsS -c "$wh2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-scope-demo@example.local\",\"password\":\"$wh2_pass\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" >/dev/null
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb,\"variant_id\":$var,\"qty\":1,\"reason\":\"ngoai pham vi\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  [ "$code" = "403" ] || { echo "warehouse nhap kho ngoai pham vi tra ve HTTP $code, mong 403"; return 1; }
+  orgb_id=""
+  for attempt in 1 2 3 4 5; do
+    orgb_id="$(sqlite3 "$OMNIFLOW_DB" "INSERT INTO orgs (name) VALUES ('Cong ty B demo'); SELECT last_insert_rowid();" 2>/dev/null)" && [ -n "$orgb_id" ] && break
+    sleep 0.2
+  done
+  [ -n "$orgb_id" ] || { echo "khong tao duoc org B de kiem tra ngoai org"; return 1; }
+  whb_org_id="$(sqlite3 "$OMNIFLOW_DB" "INSERT INTO warehouses (org_id, name, status) VALUES ($orgb_id, 'Kho org B', 'active'); SELECT last_insert_rowid();")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/warehouses/$whb_org_id")"
+  [ "$code" = "403" ] || { echo "doc kho org B tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_org_id,\"variant_id\":$var,\"qty\":1,\"reason\":\"ngoai org\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in")"
+  [ "$code" = "403" ] || { echo "nhap kho org B tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "kho: sales nhap/xem movements bi 403, warehouse ngoai pham vi bi 403, ngoai org bi 403" kho_rbac
 
 idempotency_demo() {
   local first second

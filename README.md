@@ -25,9 +25,25 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn)
 ```
+
+## Kho đa kho + tồn giữ/có thể bán (GOAL-004)
+
+Nhiều kho trong một doanh nghiệp (chỉ owner tạo/sửa, không có DELETE kho);
+tồn theo biến thể với 3 con số tồn thực tế / tồn giữ / tồn có thể bán
+(`available = on_hand - reserved`, không cho xuất quá `available`);
+nhập/xuất/điều chỉnh/kiểm kê/chuyển kho nguyên tử (2 movement)/giữ/giải
+phóng; lịch sử biến động append-only; cảnh báo tồn thấp theo
+`products.min_stock`; idempotency (`stock:<loại>:<key>`, gửi lại trả
+`replayed: true`) + chống race trong transaction `BEGIN IMMEDIATE`;
+RBAC kho theo vai + phạm vi kho (`users.warehouse_id`). Xem `docs/RBAC.md`
+(ma trận kho) và `docs/DECISIONS.md` (D17, D18). Endpoint chính:
+`POST/GET/PATCH /api/warehouses`, `POST /api/stock/in|out|adjust|count|
+transfer|reserve|release`, `GET /api/stock/levels|movements|low-stock`.
+Seed tạo sẵn 2 kho mẫu (`Kho Chính`, `Kho Phụ`) + mức tồn mẫu cho biến thể
+`SKU-SEED-01-M` (Kho Chính chỉ có 3, dưới `min_stock` 5 → tồn thấp).
 
 ## Sản phẩm, giá, CSV (GOAL-003)
 

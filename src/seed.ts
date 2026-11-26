@@ -49,13 +49,15 @@ export function seed(db: DatabaseSync, passwords: SeedPasswords): SeedResult {
   // Cả hai đều là bcrypt cost 10.
   const ownerHash: string = bcrypt.hashSync(passwords.ownerPassword, 10);
   const staffHash: string = bcrypt.hashSync(passwords.staffPassword, 10);
-  db.prepare(
-    'INSERT INTO users (org_id, branch_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(orgId, branchId, OWNER_EMAIL, ownerHash, 'owner', now);
+  const ownerId = Number(
+    db.prepare(
+      'INSERT INTO users (org_id, branch_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(orgId, branchId, OWNER_EMAIL, ownerHash, 'owner', now).lastInsertRowid,
+  );
   db.prepare(
     'INSERT INTO users (org_id, branch_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)',
   ).run(orgId, branchId, STAFF_EMAIL, staffHash, 'sales', now);
-  seedSampleProducts(db, orgId);
+  seedSampleProducts(db, orgId, branchId, ownerId);
   return { orgId, branchId, ownerEmail: OWNER_EMAIL, staffEmail: STAFF_EMAIL };
 }
 
@@ -63,8 +65,13 @@ export function seed(db: DatabaseSync, passwords: SeedPasswords): SeedResult {
  * Sản phẩm mẫu GIẢ LẬP (GOAL-003): 2 danh mục, 2 sản phẩm, 1 biến thể,
  * 1 giá riêng theo kênh. Chỉ chạy khi migration 008 đã tạo bảng products
  * (DB cũ chưa migrate thì bỏ qua, không vỡ seed).
+ * Kho mẫu (GOAL-004): 2 kho + mức tồn mẫu cho biến thể SP-SEED-01 — Kho
+ * Chính chỉ có 3 (dưới min_stock 5 → tồn thấp để demo thấy được), Kho Phụ
+ * có 20. Chỉ ghi stock_levels (không ghi stock_movements ở seed: movement
+ * có actor_id FK tới users, test khóa GOAL-001 xóa users khi kiểm tra
+ * backup/restore sẽ vỡ FK).
  */
-function seedSampleProducts(db: DatabaseSync, orgId: number): void {
+function seedSampleProducts(db: DatabaseSync, orgId: number, branchId: number, ownerId: number): void {
   const hasProducts = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'products'")
     .get() as { name: string } | undefined;
@@ -93,14 +100,48 @@ function seedSampleProducts(db: DatabaseSync, orgId: number): void {
     `INSERT INTO products (org_id, code, name, unit, price, min_stock, status, category_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
   ).run(orgId, 'SP-SEED-02', 'Nồi cơm điện giả lập', 'cái', 850000, 2, catHome, now, now);
-  db.prepare(
-    `INSERT INTO product_variants (org_id, product_id, sku, name, barcode, price_override, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-  ).run(orgId, shirtId, 'SKU-SEED-01-M', 'Size M', '8930000000011', now, now);
+  const variantId = Number(
+    db.prepare(
+      `INSERT INTO product_variants (org_id, product_id, sku, name, barcode, price_override, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+    ).run(orgId, shirtId, 'SKU-SEED-01-M', 'Size M', '8930000000011', now, now).lastInsertRowid,
+  );
   db.prepare(
     `INSERT INTO product_prices (org_id, product_id, variant_id, channel, branch_id, price, created_at, updated_at)
      VALUES (?, ?, NULL, 'web', NULL, ?, ?, ?)`,
   ).run(orgId, shirtId, 160000, now, now);
+  seedSampleStock(db, orgId, branchId, ownerId, variantId, now);
+}
+
+/** Kho + mức tồn mẫu (GOAL-004). Bỏ qua khi bảng warehouses chưa có. */
+function seedSampleStock(
+  db: DatabaseSync,
+  orgId: number,
+  branchId: number,
+  _ownerId: number,
+  variantId: number,
+  now: string,
+): void {
+  const hasWarehouses = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'warehouses'")
+    .get() as { name: string } | undefined;
+  if (!hasWarehouses) return;
+  const seedLevels: { name: string; onHand: number }[] = [
+    { name: 'Kho Chính', onHand: 3 },
+    { name: 'Kho Phụ', onHand: 20 },
+  ];
+  for (const seedLevel of seedLevels) {
+    const warehouseId = Number(
+      db
+        .prepare(
+          'INSERT INTO warehouses (org_id, name, branch_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
+        .run(orgId, seedLevel.name, branchId, 'active', now, now).lastInsertRowid,
+    );
+    db.prepare(
+      'INSERT INTO stock_levels (org_id, warehouse_id, variant_id, on_hand, reserved, updated_at) VALUES (?, ?, ?, ?, 0, ?)',
+    ).run(orgId, warehouseId, variantId, seedLevel.onHand, now);
+  }
 }
 
 const isMain = process.argv[1] !== undefined && process.argv[1].endsWith('seed.ts');

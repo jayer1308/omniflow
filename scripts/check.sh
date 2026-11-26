@@ -183,11 +183,132 @@ smoke() {
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -F "file=@$tmpdir/import-ok.csv" \
     "http://127.0.0.1:$port/api/products/import")"
   [ "$code" = "403" ] || { echo "sales import CSV tra ve HTTP $code, mong 403"; return 1; }
+  # Kho / ton (GOAL-004): tao kho -> nhap -> xuat -> xuat qua ton 400
+  # -> giu -> giai phong -> chuyen kho -> kiem ke -> ton thap ->
+  # idempotency gui lai -> race dong thoi -> RBAC 403 -> ngoai org 403.
+  local wha_res whb_res wha_id whb_id var_id in_res out_res over_body lvl
+  local res_res rel_res tr_res cnt_res low_res idem1 idem2 race_ok race_fail
+  wha_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho A smoke"}' "http://127.0.0.1:$port/api/warehouses")" || return 1
+  echo "$wha_res" | grep -q '"name":"Kho A smoke"' || { echo "tao kho A tra ve: $wha_res"; return 1; }
+  wha_id="$(echo "$wha_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  whb_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho B smoke"}' "http://127.0.0.1:$port/api/warehouses")" || return 1
+  whb_id="$(echo "$whb_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  var_id="$(echo "$var_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho sales tao"}' "http://127.0.0.1:$port/api/warehouses")"
+  [ "$code" = "403" ] || { echo "sales tao kho tra ve HTTP $code, mong 403"; return 1; }
+  in_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":50,\"reason\":\"nhap smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/in")" || return 1
+  echo "$in_res" | grep -q '"on_hand":50' || { echo "nhap kho tra ve: $in_res"; return 1; }
+  echo "$in_res" | grep -q '"available":50' || { echo "nhap kho available sai: $in_res"; return 1; }
+  out_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":20,\"reason\":\"xuat smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/out")" || return 1
+  echo "$out_res" | grep -q '"on_hand":30' || { echo "xuat kho tra ve: $out_res"; return 1; }
+  over_body="$(curl -s -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":40,\"reason\":\"xuat qua ton\"}" \
+    "http://127.0.0.1:$port/api/stock/out")"
+  echo "$over_body" | grep -q 'insufficient_stock' || { echo "xuat qua ton thieu ma loi: $over_body"; return 1; }
+  res_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":10,\"reason\":\"giu smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/reserve")" || return 1
+  echo "$res_res" | grep -q '"reserved":10' || { echo "giu hang tra ve: $res_res"; return 1; }
+  echo "$res_res" | grep -q '"available":20' || { echo "giu hang available sai: $res_res"; return 1; }
+  rel_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":4,\"reason\":\"giai phong smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/release")" || return 1
+  echo "$rel_res" | grep -q '"reserved":6' || { echo "giai phong tra ve: $rel_res"; return 1; }
+  tr_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"from_warehouse_id\":$wha_id,\"to_warehouse_id\":$whb_id,\"variant_id\":$var_id,\"qty\":5,\"reason\":\"chuyen smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/transfer")" || return 1
+  echo "$tr_res" | grep -q '"on_hand":25' || { echo "chuyen kho tra ve: $tr_res"; return 1; }
+  lvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$whb_id&variant_id=$var_id")" || return 1
+  echo "$lvl" | grep -q '"on_hand":5' || { echo "kho dich sau chuyen: $lvl"; return 1; }
+  cnt_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_id,\"variant_id\":$var_id,\"counted_qty\":8,\"reason\":\"kiem ke smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/count")" || return 1
+  echo "$cnt_res" | grep -q '"on_hand":8' || { echo "kiem ke tra ve: $cnt_res"; return 1; }
+  low_res="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/low-stock")" || return 1
+  echo "$low_res" | grep -q '"sku":"SKU-SEED-01-M"' || { echo "ton thap thieu cap seed: $low_res"; return 1; }
+  idem1="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-key-1' -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_id,\"variant_id\":$var_id,\"qty\":5,\"reason\":\"nhap idem\"}" \
+    "http://127.0.0.1:$port/api/stock/in")" || return 1
+  echo "$idem1" | grep -q '"on_hand":13' || { echo "nhap idem lan 1 tra ve: $idem1"; return 1; }
+  idem2="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-key-1' -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_id,\"variant_id\":$var_id,\"qty\":5,\"reason\":\"nhap idem\"}" \
+    "http://127.0.0.1:$port/api/stock/in")" || return 1
+  echo "$idem2" | grep -q '"replayed":true' || { echo "gui lai khong replay: $idem2"; return 1; }
+  lvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$whb_id&variant_id=$var_id")" || return 1
+  echo "$lvl" | grep -q '"on_hand":13' || { echo "gui lai van tru them: $lvl"; return 1; }
+  # Race: giai phong het + kiem ke ve 50, 10 yeu cau xuat 10 dong thoi.
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":6,\"reason\":\"giai phong het\"}" \
+    "http://127.0.0.1:$port/api/stock/release" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"counted_qty\":50,\"reason\":\"kiem ke ve 50\"}" \
+    "http://127.0.0.1:$port/api/stock/count" >/dev/null || return 1
+  local i pids
+  pids=()
+  for i in $(seq 1 10); do
+    ( curl -s -o /dev/null -w '%{http_code}\n' -b "$cookie" -H 'Content-Type: application/json' \
+      -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":10,\"reason\":\"xuat race\"}" \
+      "http://127.0.0.1:$port/api/stock/out" > "$tmpdir/race-$i.code" ) &
+    pids+=($!)
+  done
+  wait "${pids[@]}"
+  race_ok="$(cat "$tmpdir"/race-*.code | grep -c '^200$' || true)"
+  race_fail="$(cat "$tmpdir"/race-*.code | grep -c '^400$' || true)"
+  [ "$race_ok" = "5" ] || { echo "race: $race_ok yeu cau thanh cong, mong 5"; return 1; }
+  [ "$race_fail" = "5" ] || { echo "race: $race_fail yeu cau bi 400, mong 5"; return 1; }
+  lvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$wha_id&variant_id=$var_id")" || return 1
+  echo "$lvl" | grep -q '"on_hand":0' || { echo "ton cuoi sau race: $lvl"; return 1; }
+  # RBAC kho: sales nhap kho / xem movements bi 403; warehouse chi duoc kho duoc gan.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$var_id,\"qty\":1,\"reason\":\"sales nhap\"}" \
+    "http://127.0.0.1:$port/api/stock/in")"
+  [ "$code" = "403" ] || { echo "sales nhap kho tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/stock/movements")"
+  [ "$code" = "403" ] || { echo "sales xem movements tra ve HTTP $code, mong 403"; return 1; }
+  local wh2_pass wh2_res wh2_id wh2_cookie
+  wh2_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  wh2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-scope-smoke@example.local\",\"password\":\"$wh2_pass\",\"role\":\"warehouse\",\"branch_id\":1}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  wh2_id="$(echo "$wh2_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")"
+  curl -fsS -X PATCH -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id}" \
+    "http://127.0.0.1:$port/api/users/$wh2_id/scope" >/dev/null || return 1
+  wh2_cookie="$tmpdir/wh2-cookie.txt"
+  curl -fsS -c "$wh2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"kho-scope-smoke@example.local\",\"password\":\"$wh2_pass\"}" \
+    "http://127.0.0.1:$port/login" >/dev/null || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_id,\"variant_id\":$var_id,\"qty\":1,\"reason\":\"ngoai pham vi\"}" \
+    "http://127.0.0.1:$port/api/stock/in")"
+  [ "$code" = "403" ] || { echo "warehouse nhap kho ngoai pham vi tra ve HTTP $code, mong 403"; return 1; }
+  # Ngoai org: chen truc tiep org B + kho B vao DB tam roi goi tu org A.
+  local orgb_id whb_org_id attempt
+  orgb_id=""
+  for attempt in 1 2 3 4 5; do
+    orgb_id="$(sqlite3 "$tmpdir/smoke.db" "INSERT INTO orgs (name) VALUES ('Cong ty B smoke'); SELECT last_insert_rowid();" 2>/dev/null)" && [ -n "$orgb_id" ] && break
+    sleep 0.2
+  done
+  [ -n "$orgb_id" ] || { echo "khong tao duoc org B de kiem tra ngoai org"; return 1; }
+  whb_org_id="$(sqlite3 "$tmpdir/smoke.db" "INSERT INTO warehouses (org_id, name, status) VALUES ($orgb_id, 'Kho org B', 'active'); SELECT last_insert_rowid();")" || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" "http://127.0.0.1:$port/api/warehouses/$whb_org_id")"
+  [ "$code" = "403" ] || { echo "doc kho org B tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$whb_org_id,\"variant_id\":$var_id,\"qty\":1,\"reason\":\"ngoai org\"}" \
+    "http://127.0.0.1:$port/api/stock/in")"
+  [ "$code" = "403" ] || { echo "nhap kho org B tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403)"
 }
 step "smoke server" smoke
 
