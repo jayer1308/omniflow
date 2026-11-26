@@ -25,6 +25,7 @@ demo_step() {
   fi
 }
 
+demo_step "npm ci" npm ci --no-audit --no-fund
 demo_step "tsc --noEmit" npx tsc --noEmit
 demo_step "vitest" npx vitest run
 
