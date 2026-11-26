@@ -1,6 +1,6 @@
 # GOAL-001 v2: OmniFlow nền tảng: repo + APOS setup approved; khung Express+SQLite chạy được (health, migration, seed giả lập); auth session + bcrypt với 2 vai nền; đa tenant + idempotency ở mức khung; adapter fake payment/shipping/email; docs vận hành + backup/restore; check/demo xanh
 
-Status: approved
+Status: testing
 
 ```json
 {
