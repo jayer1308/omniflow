@@ -199,6 +199,48 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );`,
   },
+  {
+    // GOAL-004: kho đa kho + tồn. warehouses cấp org (branch_id NULL
+    // optional, chỉ để hiển thị, không gate quyền); stock_levels tồn theo
+    // biến thể (UNIQUE org/warehouse/variant, CHECK reserved <= on_hand);
+    // stock_movements append-only (chỉ INSERT, không API sửa/xóa).
+    version: 9,
+    sql: `CREATE TABLE IF NOT EXISTS warehouses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      name TEXT NOT NULL,
+      branch_id INTEGER REFERENCES branches(id),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS stock_levels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+      variant_id INTEGER NOT NULL REFERENCES product_variants(id),
+      on_hand INTEGER NOT NULL DEFAULT 0 CHECK (on_hand >= 0),
+      reserved INTEGER NOT NULL DEFAULT 0 CHECK (reserved >= 0),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (org_id, warehouse_id, variant_id),
+      CHECK (reserved <= on_hand)
+    );
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+      variant_id INTEGER NOT NULL REFERENCES product_variants(id),
+      type TEXT NOT NULL CHECK (type IN ('in', 'out', 'adjust', 'count', 'transfer_in', 'transfer_out', 'reserve', 'release')),
+      qty_change INTEGER NOT NULL,
+      reserved_change INTEGER NOT NULL DEFAULT 0,
+      on_hand_after INTEGER NOT NULL,
+      reserved_after INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      reference TEXT,
+      actor_id INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

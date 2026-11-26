@@ -15,6 +15,14 @@ import type { SessionUser } from './auth.js';
 import { withIdempotency } from './idempotency.js';
 import { effectivePrice, isAllowedChannel, parseProductCsvWithLines } from './products.js';
 import { can, ROLES, type Role } from './rbac.js';
+import {
+  applyMovement,
+  runStockTransaction,
+  stockLevel,
+  withStockIdempotency,
+  type StockLevelRow,
+  type StockMovementType,
+} from './stock.js';
 import { assertSameOrg, tenantScope, type TenantRequest } from './tenant.js';
 
 const SESSION_COOKIE = 'omniflow_session';
@@ -112,6 +120,15 @@ function visibleAuditRows(db: DatabaseSync, actor: SessionUser): AuditRow[] {
       }
     } catch {
       return false;
+    }
+    // Bản ghi không gắn target_user_id (kho, sản phẩm/giá/CSV...): manager
+    // thấy khi người thực hiện (row.user_id) nằm trong phạm vi chi nhánh
+    // của mình — theo luật GOAL-002 (bản ghi liên quan user trong phạm vi
+    // + do mình làm). Owner thấy toàn org (đã trả ở trên).
+    if (row.user_id !== null) {
+      const b = targetBranch(row.user_id);
+      if (b === undefined) return false;
+      return actor.branchId === null || b === actor.branchId;
     }
     return false;
   });
@@ -230,6 +247,7 @@ export function createApp(db: DatabaseSync): Express {
       orgId: row.org_id,
       branchId: row.branch_id,
       status: row.status,
+      warehouseId: row.warehouse_id,
     };
     const token = createSession(db, user);
     res.cookie(SESSION_COOKIE, token, { httpOnly: true, path: '/', sameSite: 'lax' });
@@ -515,6 +533,21 @@ export function createApp(db: DatabaseSync): Express {
         | undefined;
       if (!branch || branch.org_id !== actor.orgId) {
         res.status(403).json({ error: 'Chi nhánh không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    // GOAL-004 / D18: warehouse_id phải trỏ tới kho tồn tại trong cùng org
+    // (kiểm tra ở tầng service khi gán; không tồn tại -> 400, ngoài org -> 403).
+    if (newWarehouse !== null) {
+      const warehouse = db.prepare('SELECT org_id FROM warehouses WHERE id = ?').get(newWarehouse) as
+        | { org_id: number }
+        | undefined;
+      if (!warehouse) {
+        res.status(400).json({ error: 'Kho không tồn tại' });
+        return;
+      }
+      if (warehouse.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Kho không thuộc doanh nghiệp của bạn' });
         return;
       }
     }
@@ -2063,31 +2096,795 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
-  // ---------- Kho / ton (GOAL-004) — STUB cho Tester ----------
-  // Worker thay bang logic that: hien tai moi endpoint kho tra 501
-  // "not implemented" de test acceptance DO dung ly do. Ca route DELETE
-  // kho / sua-xoa lich su cung la stub 501 (khong phai 404) de test
-  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
-  const stockNotImplemented = (_req: TenantRequest, res: Response): void => {
-    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
-  };
-  app.post('/api/warehouses', stockNotImplemented);
-  app.get('/api/warehouses', stockNotImplemented);
-  app.get('/api/warehouses/:id', stockNotImplemented);
-  app.patch('/api/warehouses/:id', stockNotImplemented);
-  app.delete('/api/warehouses/:id', stockNotImplemented);
-  app.post('/api/stock/in', stockNotImplemented);
-  app.post('/api/stock/out', stockNotImplemented);
-  app.post('/api/stock/adjust', stockNotImplemented);
-  app.post('/api/stock/count', stockNotImplemented);
-  app.post('/api/stock/transfer', stockNotImplemented);
-  app.post('/api/stock/reserve', stockNotImplemented);
-  app.post('/api/stock/release', stockNotImplemented);
-  app.get('/api/stock/levels', stockNotImplemented);
-  app.get('/api/stock/movements', stockNotImplemented);
-  app.patch('/api/stock/movements/:id', stockNotImplemented);
-  app.delete('/api/stock/movements/:id', stockNotImplemented);
-  app.get('/api/stock/low-stock', stockNotImplemented);
+  // ---------- Kho / tồn (GOAL-004) ----------
+  // KHÔNG có endpoint DELETE kho và KHÔNG có API sửa/xóa lịch sử biến động
+  // (PATCH/DELETE /api/stock/movements/:id): gọi các route đó trả 404 mặc
+  // định của Express. Mọi thao tác tồn chạy trong transaction BEGIN
+  // IMMEDIATE (xem src/stock.ts) + audit_log.
+
+  interface WarehouseRow {
+    id: number;
+    org_id: number;
+    name: string;
+    branch_id: number | null;
+    status: 'active' | 'inactive';
+    created_at: string;
+    updated_at: string;
+  }
+
+  function getWarehouseById(id: number): WarehouseRow | undefined {
+    return db.prepare('SELECT * FROM warehouses WHERE id = ?').get(id) as WarehouseRow | undefined;
+  }
+
+  function isPosInt(value: unknown): value is number {
+    return typeof value === 'number' && Number.isInteger(value) && value > 0;
+  }
+
+  function parseQueryInt(value: unknown): number | null {
+    if (typeof value !== 'string') return null;
+    const n = Number(value);
+    return Number.isInteger(n) ? n : null;
+  }
+
+  /** Ảnh chụp mức tồn (dùng cho audit before/after); chưa có dòng tồn = 0/0. */
+  function levelSnapshot(level: StockLevelRow | null): { on_hand: number; reserved: number } {
+    return level ? { on_hand: level.on_hand, reserved: level.reserved } : { on_hand: 0, reserved: 0 };
+  }
+
+  function auditStockOp(
+    actor: SessionUser,
+    action: string,
+    warehouseId: number,
+    variantId: number,
+    before: { on_hand: number; reserved: number } | null,
+    after: { on_hand: number; reserved: number },
+    extra: Record<string, unknown> = {},
+  ): void {
+    writeAudit(db, actor.orgId, actor.id, action, {
+      target_warehouse_id: warehouseId,
+      target_variant_id: variantId,
+      before,
+      after,
+      ...extra,
+    });
+  }
+
+  /** Tải kho theo id thô (body): thiếu/không nguyên -> 400, không thấy -> 404, ngoài org -> 403. */
+  function loadWarehouse(res: Response, actor: SessionUser, raw: unknown): WarehouseRow | null {
+    if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+      res.status(400).json({ error: 'warehouse_id không hợp lệ' });
+      return null;
+    }
+    const wh = getWarehouseById(raw);
+    if (!wh) {
+      res.status(404).json({ error: 'Không tìm thấy kho' });
+      return null;
+    }
+    if (wh.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Kho không thuộc doanh nghiệp của bạn' });
+      return null;
+    }
+    return wh;
+  }
+
+  /** Tải biến thể theo id thô (body): thiếu -> 400, không thấy -> 404, ngoài org -> 403. */
+  function loadVariant(res: Response, actor: SessionUser, raw: unknown): VariantRow | null {
+    if (raw === undefined || raw === null) {
+      res.status(400).json({ error: 'variant_id bắt buộc (tồn theo biến thể, không có biến thể thì không nhập kho được)' });
+      return null;
+    }
+    if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+      res.status(400).json({ error: 'variant_id không hợp lệ' });
+      return null;
+    }
+    const variant = getVariantById(db, raw);
+    if (!variant) {
+      res.status(404).json({ error: 'Không tìm thấy biến thể' });
+      return null;
+    }
+    if (variant.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Biến thể không thuộc doanh nghiệp của bạn' });
+      return null;
+    }
+    return variant;
+  }
+
+  /** Map lỗi nghiệp vụ kho (xem src/stock.ts) sang HTTP. */
+  function stockFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('insufficient_stock')) {
+      res.status(400).json({ error: msg, code: 'insufficient_stock' });
+      return;
+    }
+    if (msg.startsWith('invalid_stock')) {
+      res.status(400).json({ error: msg, code: 'invalid_stock' });
+      return;
+    }
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý tồn kho' });
+  }
+
+  /** Key idempotency có tên miền stock:<loại>:<key>, từ header hoặc body. */
+  function stockKey(req: TenantRequest, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = req.body as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `stock:${op}:${raw}`;
+  }
+
+  /** Chạy thao tác tồn: có key thì qua withStockIdempotency (kiểm tra + thực
+   * thi + ghi key trong 1 transaction), không key thì chỉ bọc transaction. */
+  function runStockOp<T>(
+    actor: SessionUser,
+    key: string | null,
+    execute: () => T,
+  ): { replayed: boolean; result: T } {
+    if (key !== null) return withStockIdempotency(db, actor.orgId, key, execute);
+    return { replayed: false, result: runStockTransaction(db, execute) };
+  }
+
+  function respondStock(res: Response, outcome: { replayed: boolean; result: unknown }): void {
+    res.json(
+      outcome.replayed ? { ...(outcome.result as Record<string, unknown>), replayed: true } : outcome.result,
+    );
+  }
+
+  /**
+   * Tiền kiểm tra chung cho thao tác tồn 1 kho: kho + biến thể tồn tại
+   * trong org, đúng vai + đúng phạm vi kho (can), kho đang active.
+   */
+  function stockPrelude(
+    res: Response,
+    actor: SessionUser,
+    action: 'stock-in' | 'stock-out' | 'stock-adjust' | 'stock-count' | 'stock-reserve' | 'stock-release',
+    body: { warehouse_id?: unknown; variant_id?: unknown },
+  ): { wh: WarehouseRow; variant: VariantRow } | null {
+    const wh = loadWarehouse(res, actor, body.warehouse_id);
+    if (!wh) return null;
+    const variant = loadVariant(res, actor, body.variant_id);
+    if (!variant) return null;
+    if (!can(actor, action, { orgId: actor.orgId, warehouseId: wh.id })) {
+      res.status(403).json({ error: 'Bạn không được phép thao tác tồn kho này' });
+      return null;
+    }
+    if (wh.status !== 'active') {
+      res.status(400).json({ error: 'Kho không hoạt động, không nhận thao tác tồn mới', code: 'warehouse_inactive' });
+      return null;
+    }
+    return { wh, variant };
+  }
+
+  /** Thực thi 1 biến động tồn (1 kho) + audit, trả mức tồn mới. */
+  function execSingleMovement(
+    actor: SessionUser,
+    ctx: { wh: WarehouseRow; variant: VariantRow },
+    type: StockMovementType,
+    action: string,
+    qtyChange: number,
+    reservedChange: number,
+    reason: string,
+    reference: string | null,
+  ): StockLevelRow {
+    const before = levelSnapshot(stockLevel(db, actor.orgId, ctx.wh.id, ctx.variant.id));
+    const level = applyMovement(db, actor.orgId, actor.id, {
+      warehouse_id: ctx.wh.id,
+      variant_id: ctx.variant.id,
+      type,
+      qty_change: qtyChange,
+      reserved_change: reservedChange,
+      reason,
+      reference,
+    });
+    auditStockOp(actor, action, ctx.wh.id, ctx.variant.id, before, {
+      on_hand: level.on_hand,
+      reserved: level.reserved,
+    }, { reason: reason.trim(), reference });
+    return level;
+  }
+
+  // ----- Kho: tạo / liệt kê / chi tiết / sửa (chỉ owner tạo/sửa) -----
+
+  app.post('/api/warehouses', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'create-warehouse', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'Chỉ chủ doanh nghiệp được tạo kho' });
+      return;
+    }
+    const body = req.body as { name?: unknown; branch_id?: unknown; status?: unknown };
+    if (!isNonEmptyString(body.name)) {
+      res.status(400).json({ error: 'Tên kho bắt buộc' });
+      return;
+    }
+    let branchId: number | null = null;
+    if (body.branch_id !== undefined && body.branch_id !== null) {
+      if (typeof body.branch_id !== 'number' || !Number.isInteger(body.branch_id)) {
+        res.status(400).json({ error: 'branch_id không hợp lệ' });
+        return;
+      }
+      branchId = body.branch_id;
+      const branch = db.prepare('SELECT org_id FROM branches WHERE id = ?').get(branchId) as
+        | { org_id: number }
+        | undefined;
+      if (!branch) {
+        res.status(404).json({ error: 'Không tìm thấy chi nhánh' });
+        return;
+      }
+      if (branch.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Chi nhánh không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    let status: 'active' | 'inactive' = 'active';
+    if (body.status !== undefined) {
+      if (body.status !== 'active' && body.status !== 'inactive') {
+        res.status(400).json({ error: 'status không hợp lệ (chỉ active/inactive)' });
+        return;
+      }
+      status = body.status;
+    }
+    const now = new Date().toISOString();
+    const id = Number(
+      db
+        .prepare(
+          'INSERT INTO warehouses (org_id, name, branch_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
+        .run(actor.orgId, (body.name as string).trim(), branchId, status, now, now).lastInsertRowid,
+    );
+    const created = getWarehouseById(id) as WarehouseRow;
+    writeAudit(db, actor.orgId, actor.id, 'create-warehouse', {
+      target_warehouse_id: id,
+      before: null,
+      after: { name: created.name, branch_id: created.branch_id, status: created.status, org_id: created.org_id },
+    });
+    res.status(201).json(created);
+  });
+
+  app.get('/api/warehouses', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const branchId = parseQueryInt(req.query.branch_id);
+    let sql = 'SELECT * FROM warehouses WHERE org_id = ?';
+    const params: (number | string)[] = [actor.orgId];
+    if (status !== undefined) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+    if (branchId !== null) {
+      sql += ' AND branch_id = ?';
+      params.push(branchId);
+    }
+    sql += ' ORDER BY id';
+    const rows = db.prepare(sql).all(...params) as unknown as WarehouseRow[];
+    res.json(rows);
+  });
+
+  app.get('/api/warehouses/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const wh = getWarehouseById(id);
+    if (!wh) {
+      res.status(404).json({ error: 'Không tìm thấy kho' });
+      return;
+    }
+    if (wh.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Kho không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    res.json(wh);
+  });
+
+  app.patch('/api/warehouses/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const wh = getWarehouseById(id);
+    if (!wh) {
+      res.status(404).json({ error: 'Không tìm thấy kho' });
+      return;
+    }
+    if (wh.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'Kho không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    if (!can(actor, 'manage-warehouse', { orgId: actor.orgId, warehouseId: wh.id })) {
+      res.status(403).json({ error: 'Chỉ chủ doanh nghiệp được sửa kho' });
+      return;
+    }
+    const body = req.body as { name?: unknown; status?: unknown; branch_id?: unknown };
+    const before = { name: wh.name, status: wh.status, branch_id: wh.branch_id };
+    let nextName = wh.name;
+    if (body.name !== undefined) {
+      if (!isNonEmptyString(body.name)) {
+        res.status(400).json({ error: 'Tên kho bắt buộc' });
+        return;
+      }
+      nextName = (body.name as string).trim();
+    }
+    let nextStatus = wh.status;
+    if (body.status !== undefined) {
+      if (body.status !== 'active' && body.status !== 'inactive') {
+        res.status(400).json({ error: 'status không hợp lệ (chỉ active/inactive)' });
+        return;
+      }
+      nextStatus = body.status;
+    }
+    let nextBranch = wh.branch_id;
+    if (body.branch_id !== undefined) {
+      if (body.branch_id === null) {
+        nextBranch = null;
+      } else {
+        if (typeof body.branch_id !== 'number' || !Number.isInteger(body.branch_id)) {
+          res.status(400).json({ error: 'branch_id không hợp lệ' });
+          return;
+        }
+        nextBranch = body.branch_id;
+        const branch = db.prepare('SELECT org_id FROM branches WHERE id = ?').get(nextBranch) as
+          | { org_id: number }
+          | undefined;
+        if (!branch) {
+          res.status(404).json({ error: 'Không tìm thấy chi nhánh' });
+          return;
+        }
+        if (branch.org_id !== actor.orgId) {
+          res.status(403).json({ error: 'Chi nhánh không thuộc doanh nghiệp của bạn' });
+          return;
+        }
+      }
+    }
+    db.prepare('UPDATE warehouses SET name = ?, status = ?, branch_id = ?, updated_at = ? WHERE id = ?').run(
+      nextName,
+      nextStatus,
+      nextBranch,
+      new Date().toISOString(),
+      wh.id,
+    );
+    writeAudit(db, actor.orgId, actor.id, 'update-warehouse', {
+      target_warehouse_id: wh.id,
+      before,
+      after: { name: nextName, status: nextStatus, branch_id: nextBranch },
+    });
+    res.json(getWarehouseById(wh.id) as WarehouseRow);
+  });
+
+  // ----- Nhập / xuất kho -----
+
+  function stockInOut(type: 'in' | 'out') {
+    return (req: TenantRequest, res: Response): void => {
+      const actor = req.user as SessionUser;
+      const body = req.body as {
+        warehouse_id?: unknown;
+        variant_id?: unknown;
+        qty?: unknown;
+        reason?: unknown;
+        reference?: unknown;
+        idempotency_key?: unknown;
+      };
+      const ctx = stockPrelude(res, actor, type === 'in' ? 'stock-in' : 'stock-out', body);
+      if (!ctx) return;
+      const qty = body.qty;
+      if (!isPosInt(qty)) {
+        res.status(400).json({ error: 'qty phải là số nguyên > 0' });
+        return;
+      }
+      const reason = body.reason;
+      if (!isNonEmptyString(reason)) {
+        res.status(400).json({ error: 'reason bắt buộc' });
+        return;
+      }
+      const reference = typeof body.reference === 'string' ? body.reference : null;
+      try {
+        const outcome = runStockOp(actor, stockKey(req, type), () =>
+          execSingleMovement(
+            actor,
+            ctx,
+            type,
+            type === 'in' ? 'stock-in' : 'stock-out',
+            type === 'in' ? qty : -qty,
+            0,
+            reason,
+            reference,
+          ),
+        );
+        respondStock(res, outcome);
+      } catch (err) {
+        stockFail(res, err);
+      }
+    };
+  }
+
+  app.post('/api/stock/in', requireAuth, stockInOut('in'));
+  app.post('/api/stock/out', requireAuth, stockInOut('out'));
+
+  // ----- Điều chỉnh / kiểm kê -----
+
+  app.post('/api/stock/adjust', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const body = req.body as {
+      warehouse_id?: unknown;
+      variant_id?: unknown;
+      qty_change?: unknown;
+      reason?: unknown;
+      reference?: unknown;
+      idempotency_key?: unknown;
+    };
+    const ctx = stockPrelude(res, actor, 'stock-adjust', body);
+    if (!ctx) return;
+    const delta = body.qty_change;
+    if (typeof delta !== 'number' || !Number.isInteger(delta) || delta === 0) {
+      res.status(400).json({ error: 'qty_change phải là số nguyên khác 0' });
+      return;
+    }
+    const reason = body.reason;
+    if (!isNonEmptyString(reason)) {
+      res.status(400).json({ error: 'reason bắt buộc' });
+      return;
+    }
+    const reference = typeof body.reference === 'string' ? body.reference : null;
+    try {
+      const outcome = runStockOp(actor, stockKey(req, 'adjust'), () =>
+        execSingleMovement(actor, ctx, 'adjust', 'stock-adjust', delta, 0, reason, reference),
+      );
+      respondStock(res, outcome);
+    } catch (err) {
+      stockFail(res, err);
+    }
+  });
+
+  app.post('/api/stock/count', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const body = req.body as {
+      warehouse_id?: unknown;
+      variant_id?: unknown;
+      counted_qty?: unknown;
+      reason?: unknown;
+      reference?: unknown;
+      idempotency_key?: unknown;
+    };
+    const ctx = stockPrelude(res, actor, 'stock-count', body);
+    if (!ctx) return;
+    const counted = body.counted_qty;
+    if (typeof counted !== 'number' || !Number.isInteger(counted) || counted < 0) {
+      res.status(400).json({ error: 'counted_qty phải là số nguyên >= 0' });
+      return;
+    }
+    const reason = body.reason;
+    if (!isNonEmptyString(reason)) {
+      res.status(400).json({ error: 'reason bắt buộc' });
+      return;
+    }
+    const reference = typeof body.reference === 'string' ? body.reference : null;
+    try {
+      const outcome = runStockOp(actor, stockKey(req, 'count'), () => {
+        const before = levelSnapshot(stockLevel(db, actor.orgId, ctx.wh.id, ctx.variant.id));
+        const level = applyMovement(db, actor.orgId, actor.id, {
+          warehouse_id: ctx.wh.id,
+          variant_id: ctx.variant.id,
+          type: 'count',
+          qty_change: counted - before.on_hand,
+          reason,
+          reference,
+        });
+        auditStockOp(actor, 'stock-count', ctx.wh.id, ctx.variant.id, before, {
+          on_hand: level.on_hand,
+          reserved: level.reserved,
+        }, { reason: reason.trim(), reference, counted_qty: counted });
+        return level;
+      });
+      respondStock(res, outcome);
+    } catch (err) {
+      stockFail(res, err);
+    }
+  });
+
+  // ----- Chuyển kho nguyên tử (1 transaction, 2 movement) -----
+
+  app.post('/api/stock/transfer', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const body = req.body as {
+      from_warehouse_id?: unknown;
+      to_warehouse_id?: unknown;
+      variant_id?: unknown;
+      qty?: unknown;
+      reason?: unknown;
+      idempotency_key?: unknown;
+    };
+    const fromRaw = body.from_warehouse_id;
+    const toRaw = body.to_warehouse_id;
+    if (
+      typeof fromRaw !== 'number' ||
+      !Number.isInteger(fromRaw) ||
+      typeof toRaw !== 'number' ||
+      !Number.isInteger(toRaw)
+    ) {
+      res.status(400).json({ error: 'from_warehouse_id và to_warehouse_id bắt buộc' });
+      return;
+    }
+    if (fromRaw === toRaw) {
+      res.status(400).json({ error: 'Hai kho chuyển phải khác nhau' });
+      return;
+    }
+    const from = loadWarehouse(res, actor, fromRaw);
+    if (!from) return;
+    const to = loadWarehouse(res, actor, toRaw);
+    if (!to) return;
+    const variant = loadVariant(res, actor, body.variant_id);
+    if (!variant) return;
+    if (
+      !can(actor, 'stock-transfer', { orgId: actor.orgId, warehouseId: from.id }) ||
+      !can(actor, 'stock-transfer', { orgId: actor.orgId, warehouseId: to.id })
+    ) {
+      res.status(403).json({ error: 'Bạn không được phép chuyển kho này (một trong hai kho ngoài phạm vi của bạn)' });
+      return;
+    }
+    const qty = body.qty;
+    if (!isPosInt(qty)) {
+      res.status(400).json({ error: 'qty phải là số nguyên > 0' });
+      return;
+    }
+    const reason = body.reason;
+    if (!isNonEmptyString(reason)) {
+      res.status(400).json({ error: 'reason bắt buộc' });
+      return;
+    }
+    if (from.status !== 'active' || to.status !== 'active') {
+      res.status(400).json({ error: 'Kho không hoạt động, không nhận thao tác tồn mới', code: 'warehouse_inactive' });
+      return;
+    }
+    try {
+      const outcome = runStockOp(actor, stockKey(req, 'transfer'), () => {
+        const beforeFrom = levelSnapshot(stockLevel(db, actor.orgId, from.id, variant.id));
+        const beforeTo = levelSnapshot(stockLevel(db, actor.orgId, to.id, variant.id));
+        const levelFrom = applyMovement(db, actor.orgId, actor.id, {
+          warehouse_id: from.id,
+          variant_id: variant.id,
+          type: 'transfer_out',
+          qty_change: -qty,
+          reason,
+        });
+        const levelTo = applyMovement(db, actor.orgId, actor.id, {
+          warehouse_id: to.id,
+          variant_id: variant.id,
+          type: 'transfer_in',
+          qty_change: qty,
+          reason,
+        });
+        const extra = {
+          reason: reason.trim(),
+          transfer_from_warehouse_id: from.id,
+          transfer_to_warehouse_id: to.id,
+        };
+        auditStockOp(actor, 'stock-transfer', from.id, variant.id, beforeFrom, {
+          on_hand: levelFrom.on_hand,
+          reserved: levelFrom.reserved,
+        }, extra);
+        auditStockOp(actor, 'stock-transfer', to.id, variant.id, beforeTo, {
+          on_hand: levelTo.on_hand,
+          reserved: levelTo.reserved,
+        }, extra);
+        return { ...levelFrom, to_warehouse: levelTo };
+      });
+      respondStock(res, outcome);
+    } catch (err) {
+      stockFail(res, err);
+    }
+  });
+
+  // ----- Giữ / giải phóng hàng (chỉ đổi reserved) -----
+
+  function stockReserveRelease(type: 'reserve' | 'release') {
+    return (req: TenantRequest, res: Response): void => {
+      const actor = req.user as SessionUser;
+      const body = req.body as {
+        warehouse_id?: unknown;
+        variant_id?: unknown;
+        qty?: unknown;
+        reason?: unknown;
+        reference?: unknown;
+        idempotency_key?: unknown;
+      };
+      const ctx = stockPrelude(res, actor, type === 'reserve' ? 'stock-reserve' : 'stock-release', body);
+      if (!ctx) return;
+      const qty = body.qty;
+      if (!isPosInt(qty)) {
+        res.status(400).json({ error: 'qty phải là số nguyên > 0' });
+        return;
+      }
+      const reason = body.reason;
+      if (!isNonEmptyString(reason)) {
+        res.status(400).json({ error: 'reason bắt buộc' });
+        return;
+      }
+      const reference = typeof body.reference === 'string' ? body.reference : null;
+      try {
+        const outcome = runStockOp(actor, stockKey(req, type), () =>
+          execSingleMovement(
+            actor,
+            ctx,
+            type,
+            type === 'reserve' ? 'stock-reserve' : 'stock-release',
+            0,
+            type === 'reserve' ? qty : -qty,
+            reason,
+            reference,
+          ),
+        );
+        respondStock(res, outcome);
+      } catch (err) {
+        stockFail(res, err);
+      }
+    };
+  }
+
+  app.post('/api/stock/reserve', requireAuth, stockReserveRelease('reserve'));
+  app.post('/api/stock/release', requireAuth, stockReserveRelease('release'));
+
+  // ----- Đọc tồn -----
+
+  /**
+   * Phạm vi đọc tồn: kho chỉ định qua query (không thấy -> 404, ngoài org
+   * -> 403, ngoài phạm vi kho được gán -> 403); không chỉ kho thì vai
+   * warehouse chỉ thấy kho được gán, các vai khác thấy toàn org.
+   */
+  function resolveStockScope(
+    req: TenantRequest,
+    res: Response,
+    actor: SessionUser,
+    action: 'view-stock' | 'view-stock-movements',
+  ): { warehouseId: number | null } | null {
+    const raw = req.query.warehouse_id;
+    if (raw !== undefined) {
+      const wid = parseQueryInt(raw);
+      if (wid === null) {
+        res.status(400).json({ error: 'warehouse_id không hợp lệ' });
+        return null;
+      }
+      const wh = getWarehouseById(wid);
+      if (!wh) {
+        res.status(404).json({ error: 'Không tìm thấy kho' });
+        return null;
+      }
+      if (wh.org_id !== actor.orgId) {
+        res.status(403).json({ error: 'Kho không thuộc doanh nghiệp của bạn' });
+        return null;
+      }
+      if (!can(actor, action, { orgId: actor.orgId, warehouseId: wid })) {
+        res.status(403).json({ error: 'Bạn không được xem tồn kho này' });
+        return null;
+      }
+      return { warehouseId: wid };
+    }
+    if (!can(actor, action, { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'Bạn không được phép xem tồn kho' });
+      return null;
+    }
+    if (actor.role === 'warehouse' && actor.warehouseId !== null && actor.warehouseId !== undefined) {
+      return { warehouseId: actor.warehouseId };
+    }
+    return { warehouseId: null };
+  }
+
+  interface LevelQueryRow {
+    org_id: number;
+    warehouse_id: number;
+    variant_id: number;
+    product_id: number;
+    sku: string;
+    min_stock: number;
+    on_hand: number;
+    reserved: number;
+  }
+
+  function queryLevels(
+    actor: SessionUser,
+    scope: { warehouseId: number | null },
+    variantId: number | null,
+    lowFilter: boolean | null,
+    limit: number,
+    offset: number,
+  ): (LevelQueryRow & { available: number; low_stock: boolean })[] {
+    let sql = `SELECT sl.org_id AS org_id, sl.warehouse_id AS warehouse_id, sl.variant_id AS variant_id,
+      pv.product_id AS product_id, pv.sku AS sku, p.min_stock AS min_stock,
+      sl.on_hand AS on_hand, sl.reserved AS reserved
+      FROM stock_levels sl
+      JOIN product_variants pv ON pv.id = sl.variant_id
+      JOIN products p ON p.id = pv.product_id
+      WHERE sl.org_id = ?`;
+    const params: (number | string)[] = [actor.orgId];
+    if (scope.warehouseId !== null) {
+      sql += ' AND sl.warehouse_id = ?';
+      params.push(scope.warehouseId);
+    }
+    if (variantId !== null) {
+      sql += ' AND sl.variant_id = ?';
+      params.push(variantId);
+    }
+    if (lowFilter === true) sql += ' AND (sl.on_hand - sl.reserved) < p.min_stock';
+    if (lowFilter === false) sql += ' AND (sl.on_hand - sl.reserved) >= p.min_stock';
+    sql += ' ORDER BY sl.warehouse_id, sl.variant_id LIMIT ? OFFSET ?';
+    params.push(Math.max(0, limit), Math.max(0, offset));
+    const rows = db.prepare(sql).all(...params) as unknown as LevelQueryRow[];
+    return rows.map((r) => ({
+      ...r,
+      available: r.on_hand - r.reserved,
+      low_stock: r.on_hand - r.reserved < r.min_stock,
+    }));
+  }
+
+  app.get('/api/stock/levels', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const scope = resolveStockScope(req, res, actor, 'view-stock');
+    if (!scope) return;
+    let variantId: number | null = null;
+    if (req.query.variant_id !== undefined) {
+      variantId = parseQueryInt(req.query.variant_id);
+      if (variantId === null) {
+        res.status(400).json({ error: 'variant_id không hợp lệ' });
+        return;
+      }
+    }
+    let lowFilter: boolean | null = null;
+    if (req.query.low_stock === 'true') lowFilter = true;
+    else if (req.query.low_stock === 'false') lowFilter = false;
+    const limit = parseQueryInt(req.query.limit) ?? 1000;
+    const offset = parseQueryInt(req.query.offset) ?? 0;
+    res.json(queryLevels(actor, scope, variantId, lowFilter, limit, offset));
+  });
+
+  app.get('/api/stock/movements', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const scope = resolveStockScope(req, res, actor, 'view-stock-movements');
+    if (!scope) return;
+    let variantId: number | null = null;
+    if (req.query.variant_id !== undefined) {
+      variantId = parseQueryInt(req.query.variant_id);
+      if (variantId === null) {
+        res.status(400).json({ error: 'variant_id không hợp lệ' });
+        return;
+      }
+    }
+    const type = typeof req.query.type === 'string' ? req.query.type : undefined;
+    const limit = parseQueryInt(req.query.limit) ?? 1000;
+    const offset = parseQueryInt(req.query.offset) ?? 0;
+    let sql = 'SELECT * FROM stock_movements WHERE org_id = ?';
+    const params: (number | string)[] = [actor.orgId];
+    if (scope.warehouseId !== null) {
+      sql += ' AND warehouse_id = ?';
+      params.push(scope.warehouseId);
+    }
+    if (variantId !== null) {
+      sql += ' AND variant_id = ?';
+      params.push(variantId);
+    }
+    if (type !== undefined) {
+      sql += ' AND type = ?';
+      params.push(type);
+    }
+    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?';
+    params.push(Math.max(0, limit), Math.max(0, offset));
+    const rows = db.prepare(sql).all(...params) as unknown as Record<string, unknown>[];
+    res.json(rows);
+  });
+
+  app.get('/api/stock/low-stock', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const scope = resolveStockScope(req, res, actor, 'view-stock-movements');
+    if (!scope) return;
+    res.json(queryLevels(actor, scope, null, true, 1000, 0));
+  });
 
   return app;
 }

@@ -188,3 +188,64 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   riêng và xử lý lỗi phức tạp hơn); upload thật cần quyết định lưu trữ riêng.
 - Đổi khi: Goal riêng cho import biến thể qua CSV, hoặc Goal riêng cho
   upload ảnh thật.
+
+## D17 — Mô hình kho: tồn theo biến thể, available tính được, không tồn âm (26/11/2026)
+
+- Quyết định (GOAL-004, migration 009): kho là dữ liệu **cấp org**
+  (`warehouses` có `org_id`, `branch_id` NULL optional chỉ để hiển thị,
+  `status` `active`/`inactive`); tồn theo **biến thể**
+  (`stock_levels`: `UNIQUE(org_id, warehouse_id, variant_id)`,
+  `CHECK (on_hand >= 0)`, `CHECK (reserved >= 0)`,
+  `CHECK (reserved <= on_hand)`); `available = on_hand - reserved` là số
+  tính được, **không** lưu cột riêng. Lịch sử biến động append-only
+  (`stock_movements`: `type` in/out/adjust/count/transfer_in/transfer_out/
+  reserve/release, `qty_change` + `reserved_change`, `on_hand_after`/
+  `reserved_after`, `reason` bắt buộc, `reference` tự do; chỉ INSERT,
+  không có API sửa/xóa, không có endpoint DELETE kho).
+- Chính sách tồn âm: **không cho xuất quá tồn có thể bán** — xuất, chuyển
+  kho (kho nguồn), giữ hàng đều yêu cầu `qty <= available`, vi phạm → 400
+  `insufficient_stock`, không ghi movement. Điều chỉnh/kiểm kê không được
+  làm `on_hand < reserved` (→ 400). Xuất kho **không** trừ `reserved`:
+  hàng đã giữ chỉ được xuất qua luồng đơn ở GOAL-005; trong GOAL-004, xuất
+  kho chỉ trừ `on_hand` và vẫn phải thỏa `qty <= available`.
+- `reserve`/`release` là API độc lập cho luồng đơn sau này: `reserve` tăng
+  `reserved` (không đổi `on_hand`), `release` giảm `reserved`. Giữ hàng rồi
+  không giải phóng thì `available` thấp mãi — đó là hành vi đúng trong goal
+  này (GOAL-005 mới có luồng giải phóng khi hủy đơn); không "sửa" thành tự
+  giải phóng.
+- Ngưỡng tồn thấp = `products.min_stock` (D15, cấp sản phẩm), đánh giá theo
+  từng cặp (biến thể, kho): `available < min_stock` thì cặp đó tồn thấp.
+  Không thêm ngưỡng riêng cấp kho trong goal này.
+- Idempotency cho thao tác tồn: key đặt tên miền `stock:<loại>:<key>`,
+  kiểm tra key + thực thi + ghi key nằm trong **cùng một transaction
+  `BEGIN IMMEDIATE`** (`withStockIdempotency` ở `src/stock.ts`) — không dùng
+  `withIdempotency` của GOAL-001 một cách ngây thơ vì nó kiểm tra key ngoài
+  transaction nên hai yêu cầu cùng key chạy đồng thời có thể cùng lọt qua.
+  Gửi lại trả đúng response cũ kèm `replayed: true`, không thực thi lại.
+- Chống race: mọi biến động chạy trong `BEGIN IMMEDIATE` + bất biến ép bằng
+  `CHECK` ở schema. App là **một tiến trình duy nhất** (D1) nên bảo vệ race
+  chỉ có ý nghĩa trong một process; đa process là ngoài phạm vi — không
+  claim chống race đa process. Test đồng thời chứng minh bất biến (tổng xuất
+  <= available, tồn không âm), không chứng minh được khả năng đa process.
+- Biến thể của sản phẩm đã ngừng kinh doanh vẫn nhập/xuất được (hàng vật lý
+  vẫn còn). Sản phẩm chưa có biến thể thì không nhập kho được (→ 400).
+- Lý do: các quyết định này đều đã ghi trong brief GOAL-004; chốt lại ở đây
+  để GOAL-005 (đơn hàng gọi reserve/release) dùng chung không phải đoán lại.
+- Đổi khi: cần chế độ cho phép tồn âm (Goal riêng đổi chính sách), ngưỡng
+  tồn thấp riêng theo kho, hoặc đa process thật (thay store, xem D2/D3).
+
+## D18 — Kiểm tra `users.warehouse_id` tồn tại ở tầng service (26/11/2026)
+
+- Quyết định (GOAL-004): khi gán `warehouse_id` qua
+  `PATCH /api/users/:id/scope`, server kiểm tra ở **tầng service trong
+  handler** (không rebuild bảng `users` để gắn FK như migration 007 đã
+  làm): kho không tồn tại → 400, kho ngoài org → 403; gán `null` (bỏ gán)
+  luôn hợp lệ.
+- Lý do: yêu cầu của brief là **hành vi** (kho phải tồn tại trong cùng org),
+  không phải cơ chế. Rebuild bảng `users` lần nữa tốn kém và rủi ro (phải
+  tắt FK, copy toàn bộ user, remap) trong khi kho **không bao giờ bị xóa**
+  (không có endpoint DELETE kho, D17) nên không có nguy cơ rò rỉ tham chiếu
+  treo sau khi gán: một khi đã gán hợp lệ, kho đó tồn tại mãi. Kiểm tra ở
+  tầng service là đủ và giữ migration 009 gọn (chỉ thêm 3 bảng kho).
+- Đổi khi: kho có thể bị xóa (lúc đó phải gắn FK hoặc kiểm tra khi đọc), hoặc
+  cần ràng buộc toàn vẹn ở tầng DB cho `warehouse_id`.

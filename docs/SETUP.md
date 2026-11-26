@@ -78,6 +78,22 @@ DELETE), `POST/GET/PATCH /api/products/:id/variants`,
 tối đa 1000 dòng), `GET /api/products/export`. Seed tạo sẵn 2 sản phẩm mẫu
 (`SP-SEED-01`, `SP-SEED-02`) + 1 biến thể + 1 giá riêng kênh `web`.
 
+## Kho đa kho + tồn (GOAL-004)
+
+Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
+thể, `available = on_hand - reserved`, không cho xuất quá `available`
+(→ 400 `insufficient_stock`); xuất kho không trừ `reserved`. Ma trận quyền
+kho đầy đủ: `docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md`
+(D17, D18). Endpoint chính: `POST/GET/PATCH /api/warehouses` (tạo/sửa:
+chỉ owner; không có DELETE kho), `POST /api/stock/in|out|adjust|count|
+transfer|reserve|release` (owner/manager mọi kho, warehouse chỉ kho được
+gán, sales/accountant → 403; `qty` nguyên > 0, `reason` bắt buộc, hỗ trợ
+`Idempotency-Key` hoặc `idempotency_key` trong body),
+`GET /api/stock/levels|movements|low-stock` (sales xem movements/low-stock
+→ 403). Seed tạo sẵn 2 kho mẫu (`Kho Chính`, `Kho Phụ`) + mức tồn mẫu cho
+biến thể `SKU-SEED-01-M` (Kho Chính chỉ có 3, dưới `min_stock` 5 → tồn thấp
+để demo thấy được).
+
 ## Chạy test
 
 ```sh
