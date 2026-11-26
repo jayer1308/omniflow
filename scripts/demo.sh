@@ -25,7 +25,12 @@ demo_step() {
   fi
 }
 
-demo_step "npm ci" npm ci --no-audit --no-fund
+demo_step "npm ci" bash -c '
+  # Nhu check.sh: go symlink node_modules cua gate worktree truoc khi npm ci,
+  # keo npm ci xoa sach thu muc dich o main checkout.
+  if [ -L node_modules ]; then rm node_modules; fi
+  npm ci --no-audit --no-fund
+'
 demo_step "tsc --noEmit" npx tsc --noEmit
 demo_step "vitest" npx vitest run
 

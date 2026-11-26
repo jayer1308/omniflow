@@ -18,7 +18,14 @@ step() {
   fi
 }
 
-step "npm ci" npm ci --no-audit --no-fund
+step "npm ci" bash -c '
+  # Gate worktree link node_modules tu main checkout bang symlink; npm ci ma
+  # chay qua symlink se xoa sach thu muc dich o main checkout (APOS bug, da
+  # tai hien: npm ci trong worktree -> main node_modules ve 0). Go link truoc
+  # roi moi cai moi, de main checkout khong bi anh huong.
+  if [ -L node_modules ]; then rm node_modules; fi
+  npm ci --no-audit --no-fund
+'
 step "tsc --noEmit" npx tsc --noEmit
 step "vitest (L1+L2+L3)" npx vitest run
 
