@@ -1,2 +1,116 @@
+# Project setup: see docs/setup.md for the schema and workflow.
 schemaVersion: 2
-parts: {}
+parts:
+  app:
+    root: .
+    stack: typescript
+    layers:
+      L0:
+        - id: tsc
+          command: npx tsc --noEmit
+          format: exit
+      L1:
+        - id: vitest
+          command: npx vitest run --reporter=default --reporter=junit --outputFile.junit={report} --exclude "**/*.{acceptance,integration}.test.ts"
+          format: junit
+      L2:
+        - id: vitest-acceptance
+          command: npx vitest run acceptance.test --reporter=default --reporter=junit --outputFile.junit={report}
+          format: junit
+          runOne: npx vitest run "{classname}" --reporter=junit --outputFile={report} -t "^{name|spaced|regex}$"
+      L3:
+        - id: vitest-integration
+          command: npx vitest run integration.test --reporter=default --reporter=junit --outputFile.junit={report}
+          format: junit
+          runOne: npx vitest run "{classname}" --reporter=junit --outputFile={report} -t "^{name|spaced|regex}$"
+      L5:
+        - id: semgrep
+          command: semgrep scan --config auto --sarif-output={report} .
+          format: sarif
+        - id: stryker
+          command: npx stryker run --mutate "{changed}" --reporters json && node -e "const r=require('./reports/mutation/mutation.json');let k=0,t=0;for(const f of Object.values(r.files))for(const m of f.mutants){if(['Ignored','CompileError','RuntimeError'].includes(m.status))continue;t++;if(['Killed','Timeout'].includes(m.status))k++}require('fs').writeFileSync('{report}',JSON.stringify({mutationScore:t?100*k/t:0}))"
+          format: metric
+          metric: mutationScore
+          when: flag:mutation
+    needsHuman:
+      - package.json
+      - package-lock.json
+      - pnpm-lock.yaml
+      - yarn.lock
+      - tsconfig*.json
+      - eslint.config.*
+      - vitest.config.*
+      - .github/**
+    forbid:
+      - \b(?:it|test|describe)\.(?:skip|only|todo|fails)\b
+      - \b(?:xit|xtest|xdescribe|fit|fdescribe)\s*\(
+      - "@ts-(?:ignore|nocheck)"
+      - eslint-disable
+    tests:
+      paths:
+        - "**/*.test.ts"
+        - "**/*.spec.ts"
+        - tests/**
+      infra:
+        - vitest.config.*
+        - vite.config.*
+        - jest.config.*
+        - "**/vitest.setup.*"
+        - "**/setupTests.*"
+        - tsconfig*.json
+      assertPatterns:
+        - \bexpect\s*\(
+        - \bassert(?:\.\w+)?\s*\(
+        - \bexpectTypeOf\s*\(
+      notImplementedPatterns:
+        - "[Nn]ot implemented"
+        - NotImplemented
+        - "TODO: implement"
+      loadErrorPatterns:
+        - Failed to load
+        - Cannot find module
+        - Failed to resolve import
+        - SyntaxError
+        - Transform failed
+        - Unhandled Error
+      noTestsExitCodes: []
+      noTestsPatterns:
+        - No test files found
+      entryRule:
+        importPatterns:
+          - ^\s*(?:import|export)\b[^'"\n]*?\bfrom\s+['"]([^'"]+)['"]
+          - ^\s*\}\s*from\s+['"]([^'"]+)['"]
+          - ^\s*import\s+['"]([^'"]+)['"]
+        allowImports:
+          - ^vitest$
+          - "^node:"
+          - ^@vitest/
+        moduleSeparator: /
+        moduleFiles:
+          - "{path}.ts"
+          - "{path}.tsx"
+          - "{path}/index.ts"
+        stripExtension: \.(?:js|jsx|ts|tsx|mjs|cjs)$
+    manifests:
+      - package.json
+      - package-lock.json
+      - pnpm-lock.yaml
+      - yarn.lock
+floor:
+  submit:
+    - L0
+    - L1
+    - L2
+  integrate:
+    - L1
+    - L2
+    - L3
+  close:
+    - L0
+    - L1
+    - L2
+    - L3
+    - L4
+    - L5
+mutation:
+  minScore: 70
