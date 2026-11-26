@@ -7,7 +7,7 @@ Mot package WP-MAIN duy nhat adopt R-19 mo coi cua GOAL-004 va kiem chung lai 3 
   "id": "GOAL-005A",
   "version": 1,
   "goalId": "GOAL-005A",
-  "goalVersion": 1,
+  "goalVersion": 2,
   "mode": "solo-direct",
   "approach": "Mot package WP-MAIN duy nhat adopt R-19 mo coi cua GOAL-004 va kiem chung lai 3 luong tu dong theo vong doi don bang test khoa moi tren code GOAL-005 da co, KHONG them tinh nang: Tester viet file test moi tests/orders-005a-acceptance.test.ts (vitest + supertest) chung minh xac nhan don giu hang nguyen tu moi dong trong 1 transaction (thieu ton -> 400 insufficient_stock, khong giu dong nao, don o lai draft), hoan tat don = release + out trong CUNG MOT transaction (reserved ve 0, on_hand tru dung, 2 movement release + out cung reference ma don), huy tu confirmed/processing giai phong dung so da giu (reserved ve 0, on_hand khong doi), huy tu draft chi doi trang thai khong dong kho; chi sua toi thieu src/orders.ts (transitionOrderTx) / src/stock.ts (applyMovement) neu test moi phoi ra loi; docs/ROADMAP.md ghi chu GOAL-005A ngoai 12 goal chinh + docs/DECISIONS.md them D21 adopt R-19; check.sh/demo.sh giu xanh cac buoc GOAL-001..005 (mo rong toi thieu neu can).",
   "risks": [
