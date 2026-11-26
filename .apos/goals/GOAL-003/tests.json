@@ -1,0 +1,75 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "layer": "L2",
+    "part": "app",
+    "testIds": [
+      "tests/products-acceptance.test.ts::AC-1 migration 008 tao du 7 bang san pham/gia/CSV",
+      "tests/products-acceptance.test.ts::AC-1 seed mo rong them san pham mau, van giu 2 user",
+      "tests/products-acceptance.test.ts::AC-1 tao san pham 201, xem chi tiet kem bien the/thuoc tinh/anh",
+      "tests/products-acceptance.test.ts::AC-1 tao san pham sai du lieu bi 400: ten rong, gia am, gia khong nguyen, min_stock am",
+      "tests/products-acceptance.test.ts::AC-1 trung ma san pham trong org bi 409, ma giong nhau o org khac thi DUOC",
+      "tests/products-acceptance.test.ts::AC-1 trung SKU trong org bi 409, SKU giong nhau o org khac thi DUOC",
+      "tests/products-acceptance.test.ts::AC-1 trung barcode trong org bi 409, SKU rong va price_override am bi 400",
+      "tests/products-acceptance.test.ts::AC-1 tao bien the cho san pham ngoai org bi 403, san pham khong ton tai bi 404",
+      "tests/products-acceptance.test.ts::AC-1 danh muc: tao/liet ke/sua; danh muc cha khac org bi 403; thuoc tinh/anh them xoa duoc",
+      "tests/products-acceptance.test.ts::AC-1 liet ke san pham: loc status/category, tim code/name, phan trang, chi thay org minh",
+      "tests/products-acceptance.test.ts::AC-1 ngung kinh doanh giu san pham + lich su, cam tao bien the va doi gia, mo ban lai duoc",
+      "tests/products-acceptance.test.ts::AC-1 khong co endpoint DELETE san pham: DELETE tra 404/405 va san pham van doc duoc"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "layer": "L2",
+    "part": "app",
+    "testIds": [
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 1: gia rieng bien the theo kenh + chi nhanh thang",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 2: gia rieng bien the theo kenh (khong co gia kenh+chi nhanh)",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 3: gia rieng bien the theo chi nhanh",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 4: gia rieng san pham theo kenh + chi nhanh",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 5: gia rieng san pham theo kenh",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 6: gia rieng san pham theo chi nhanh",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 7: price_override cua bien the khi khong co gia rieng",
+      "tests/products-acceptance.test.ts::AC-2 fallback buoc 8: khong co gia rieng thi ve gia chuan",
+      "tests/products-acceptance.test.ts::AC-2 effectivePrice tuan thu dung thu tu fallback 8 buoc",
+      "tests/products-acceptance.test.ts::AC-2 dat gia rieng: thieu reason bi 400, kenh la bi 400, gia am bi 400",
+      "tests/products-acceptance.test.ts::AC-2 dat lai gia rieng cung to hop thi ghi de (khong tao dong trung), gia trung bi 400",
+      "tests/products-acceptance.test.ts::AC-2 doi gia chuan: thieu reason bi 400, gia trung bi 400, gia moi ghi lich su",
+      "tests/products-acceptance.test.ts::AC-2 lich su gia append-only: doi gia 2 lan co 2 dong moi nhat truoc, khong sua/xoa duoc",
+      "tests/products-acceptance.test.ts::AC-2 parseProductCsv xu ly BOM, dau phay trong ten co ngoac kep, bo dong trong"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "layer": "L2",
+    "part": "app",
+    "testIds": [
+      "tests/products-acceptance.test.ts::AC-3 preview bao loi tung dong (so dong + ly do) ma khong ghi dong nao",
+      "tests/products-acceptance.test.ts::AC-3 preview: ten chua dau phay duoc chap nhan, dong trong cuoi file bi bo qua",
+      "tests/products-acceptance.test.ts::AC-3 preview: header thieu cot bat buoc bi 400 toan file",
+      "tests/products-acceptance.test.ts::AC-3 preview: ma trung nhau trong cung file thi loi ca hai dong trung",
+      "tests/products-acceptance.test.ts::AC-3 import atomic: 1 dong loi trong 3 dong tra 422 va 0 dong duoc ghi",
+      "tests/products-acceptance.test.ts::AC-3 import file sach tra 201 {imported: n} va ghi du san pham",
+      "tests/products-acceptance.test.ts::AC-3 import trung ma voi DB tra 422 theo dong va khong ghi dong nao",
+      "tests/products-acceptance.test.ts::AC-3 import vuot 1000 dong bi 400",
+      "tests/products-acceptance.test.ts::AC-3 export khop du lieu hien tai, loc theo org/status, org rong van tra header",
+      "tests/products-acceptance.test.ts::AC-3 export round-trip: preview file vua export bao trung ma voi DB"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "layer": "L2",
+    "part": "app",
+    "testIds": [
+      "tests/products-acceptance.test.ts::AC-4 can() cho phep dung vai dung pham vi voi 8 actions moi",
+      "tests/products-acceptance.test.ts::AC-4 RBAC 403 qua HTTP: sales doi gia, warehouse tao san pham, sales ngung kinh doanh, sales import CSV",
+      "tests/products-acceptance.test.ts::AC-4 lich su gia: accountant xem duoc, warehouse bi 403, sales bi 403",
+      "tests/products-acceptance.test.ts::AC-4 user org A doc/xem/sua san pham org B bi 403",
+      "tests/products-acceptance.test.ts::AC-4 gia rieng theo chi nhanh: sales/accountant chi nhanh 1 khong xem duoc gia chi nhanh 2",
+      "tests/products-acceptance.test.ts::AC-4 export CSV duoc phep voi moi vai, xem san pham duoc phep voi moi vai",
+      "tests/products-acceptance.test.ts::AC-4 audit log ghi tao/sua/doi gia/import CSV voi actor va target_product_id",
+      "tests/products-acceptance.test.ts::AC-4 docs: RBAC.md co ma tran san pham/gia/CSV, PRICING.md co fallback 8 buoc, DECISIONS co D15/D16",
+      "tests/products-acceptance.test.ts::AC-4 check.sh va demo.sh mo rong buoc san pham/gia/CSV va giu buoc GOAL-001/002"
+    ]
+  }
+]
