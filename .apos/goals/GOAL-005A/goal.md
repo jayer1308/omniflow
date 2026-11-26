@@ -1,16 +1,16 @@
-# GOAL-005A v1: OmniFlow adopt yeu cau mo coi R-19 (GOAL-004): 3 luong tu dong theo vong doi don — xac nhan giu hang nguyen tu, huy giai phong dung so da giu, hoan tat release + out trong 1 transaction — duoc kiem chung lai bang test khoa moi tren code GOAL-005 da co (khong them tinh nang); check/demo van xanh; docs ghi chu goal bookkeeping ngoai 12 goal chinh; inbox sach sau close
+# GOAL-005A v2: OmniFlow adopt yeu cau mo coi R-19 (GOAL-004): 3 luong tu dong theo vong doi don — xac nhan giu hang nguyen tu, huy giai phong dung so da giu, hoan tat release + out trong 1 transaction — duoc kiem chung lai bang test khoa moi tren code GOAL-005 da co (khong them tinh nang); check/demo van xanh; docs ghi chu goal bookkeeping ngoai 12 goal chinh; inbox sach sau close
 
-Status: testing
+Status: approved
 
 ```json
 {
   "id": "GOAL-005A",
-  "version": 1,
+  "version": 2,
   "outcome": "OmniFlow adopt yeu cau mo coi R-19 (GOAL-004): 3 luong tu dong theo vong doi don — xac nhan giu hang nguyen tu, huy giai phong dung so da giu, hoan tat release + out trong 1 transaction — duoc kiem chung lai bang test khoa moi tren code GOAL-005 da co (khong them tinh nang); check/demo van xanh; docs ghi chu goal bookkeeping ngoai 12 goal chinh; inbox sach sau close",
   "source": {
     "path": "brief-005a.md",
     "sha256": "aaabc3ca1558c1858e3a32fcebc9c7b74c9c5c032dad97b902aae38ce39792c5",
-    "capturedAt": "2026-11-26T20:55:15.517Z",
+    "capturedAt": "2026-11-26T21:07:47.244Z",
     "origin": "human"
   },
   "requirements": [
@@ -124,7 +124,8 @@ Status: testing
       "checkIds": [
         "CHK-1",
         "CHK-2"
-      ]
+      ],
+      "proof": "stays-green"
     },
     {
       "id": "AC-2",
@@ -163,7 +164,8 @@ Status: testing
       "checkIds": [
         "CHK-1",
         "CHK-2"
-      ]
+      ],
+      "proof": "stays-green"
     }
   ],
   "checks": [
