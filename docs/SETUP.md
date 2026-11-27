@@ -172,6 +172,63 @@ giao/trả đầy đủ: `docs/RBAC.md`; quyết định mô hình:
 `docs/DECISIONS.md` (D24, D25). KHÔNG lưu thông tin thẻ; không có
 DELETE shipment/return, không có API sửa/xóa lịch sử giao/trả.
 
+## Khách hàng + CRM (GOAL-008)
+
+Hồ sơ khách hàng cấp org, chi nhánh chính `branch_id` NULL = chưa gán;
+điện thoại duy nhất trong org khi có giá trị (`UNIQUE(org_id, phone)`,
+trùng khách `active` → 409). Tạo khách (`POST /api/customers`,
+`{name, phone?, email?, address?, branch_id?}`, `name` trống → 400,
+`branch_id` không tồn tại → 404, ngoài org → 403; sales không gửi
+`branch_id` thì khách thuộc chi nhánh mình) trả 201 kèm
+`purchase_summary` rỗng + `points_balance` 0 + `segment` `'new'`; sửa
+(`PATCH /api/customers/:id`, khách `merged` → 400, đổi phone trùng →
+409). `POST /api/orders` nhận thêm `customer_id` optional (không tồn
+tại → 404, ngoài org → 403, khách `merged` → 400; không gửi thì như
+trước). Xem khách (`GET /api/customers/:id`) kèm `purchase_summary`
+(`total_spent` = tổng `total` các đơn `completed`, CHƯA trừ hoàn tiền;
+`order_count` = số đơn `completed`; `last_order_at` = đơn `completed`
+mới nhất, NULL khi chưa có) + `points_balance` + `segment`; lịch sử mua
+(`GET /api/customers/:id/orders`, mới nhất trước, kèm `items`, phân
+trang `limit`/`offset`); tìm/lọc (`GET /api/customers?name=&phone=
+&segment=&branch_id=&limit=&offset=`, `segment` lạ → 400, kèm `total`;
+khách `merged` không xuất hiện trong danh sách mặc định). Tích điểm
+(`POST /api/customers/:id/points/earn`, `{order_id, idempotency_key?}`):
+chỉ đơn `completed` của khách, 1 điểm / 10.000đ trên tổng sau hoàn
+(`order_total` − tổng hoàn `completed`), làm tròn xuống, tổng sau hoàn
+< 10.000đ → 400, mỗi đơn tích 1 lần; điểm KHÔNG hết hạn, không thu hồi
+khi hoàn tiền sau. Đổi điểm (`POST
+/api/customers/:id/points/redeem`, `{order_id, points,
+idempotency_key?}`): chỉ đơn `draft` của khách, 1 điểm = 100đ, discount
+= min(`points` × 100, `order_total`), một đơn chỉ đổi 1 lần, điểm không
+âm; `outstanding` = `order_total` − `points_discount` − `paid_total`,
+`payment_status` giữ nguyên logic D22 (đơn đổi hết tổng mà chưa trả
+đồng nào vẫn `unpaid`). Xem điểm (`GET /api/customers/:id/points` trả
+`{balance, ledger}` mới nhất trước). Ghi chú (`POST
+/api/customers/:id/notes`, `{content, idempotency_key?}`, trống → 400;
+`GET /api/customers/:id/notes` mới nhất trước, phân trang); ghi chú +
+ledger append-only, không có API sửa/xóa (gọi → 404). Phân khúc tính ở
+service mỗi lần đọc, KHÔNG lưu cột `segment`: VIP khi `total_spent` ≥
+5.000.000đ hoặc `order_count` ≥ 10; ngủ quên khi có ≥ 1 đơn hoàn tất và
+lần mua cuối > 90 ngày; thường xuyên khi `order_count` ≥ 3; còn lại mới;
+ưu tiên VIP → ngủ quên → thường xuyên → mới. Hợp nhất
+(`POST /api/customers/:id/merge`, `{source_customer_id, confirm,
+idempotency_key?}`, `confirm` phải là `true`, thiếu/sai → 400): chuyển
+mọi đơn + ledger + ghi chú của nguồn sang hồ sơ giữ trong cùng
+transaction, nguồn chuyển `merged` + `merged_into_id` + `phone`/`email`
+về NULL, row nguồn giữ lại. Xuất dữ liệu (`GET
+/api/customers/:id/export` trả `{customer, orders, points: {balance,
+ledger}, notes}` + 1 audit log; khách `merged` vẫn export được,
+orders/points/notes rỗng kèm `merged_into_id`). Xóa
+(`DELETE /api/customers/:id`) chỉ khi khách CHƯA CÓ đơn nào (có đơn →
+400; đã `merged` → 400), xóa cứng kèm ghi chú + ledger + 1 audit log.
+`audit_log.detail` của MỌI thao tác khách KHÔNG chứa `phone`/`email`/
+`address`. Idempotency: header `Idempotency-Key` hoặc `idempotency_key`
+trong body, tên miền `customer:points-earn:<key>` /
+`customer:points-redeem:<key>` / `customer:merge:<key>`, gửi lại trả
+`replayed: true`. Ma trận quyền khách/CRM đầy đủ: `docs/RBAC.md`;
+quyết định mô hình: `docs/DECISIONS.md` (D26). KHÔNG lưu thông tin thẻ;
+không thêm màn hình khách/CRM (GOAL-012).
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
