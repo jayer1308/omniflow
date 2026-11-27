@@ -23,6 +23,8 @@ interface Migration {
  * warehouse_id chuẩn bị; rebuild bảng, remap staff -> sales) -> 008 sản
  * phẩm/giá/CSV (GOAL-003: categories, products, product_variants,
  * product_attributes, product_images, product_prices, price_history).
+ * ... -> 014 khuyen mai (GOAL-009) -> 015 thong bao + job (GOAL-011:
+ * notifications, notification_preferences, jobs — chi schema, chua logic).
  * created_at có DEFAULT để insert tối thiểu (chỉ nêu khóa chính) vẫn hợp lệ.
  * idempotency_keys không FK tới orgs: helper idempotency phải dùng được ngay
  * cả khi org chưa được tạo trong cùng giao dịch seed/test.
@@ -474,6 +476,50 @@ const MIGRATIONS: Migration[] = [
     );
     ALTER TABLE orders ADD COLUMN promotion_id INTEGER NULL REFERENCES promotions(id);
     ALTER TABLE orders ADD COLUMN promo_discount INTEGER NOT NULL DEFAULT 0 CHECK (promo_discount >= 0);`,
+  },
+  {
+    // GOAL-011 (STUB cua Tester): chi tao 3 bang theo brief-011 R-2/R-3/R-4
+    // (schema, chua co logic gui/job — Worker giu schema nay, viet logic
+    // o src/notifications.ts + src/jobs.ts + routes). event_key UNIQUE
+    // chong gui trung; preferences UNIQUE(user_id, event_type), thieu dong
+    // = BAT; jobs: type/status/max_attempts = 3, next_run_at mac dinh now.
+    version: 15,
+    sql: `CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      event_key TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      channel TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('email')),
+      recipient_user_id INTEGER REFERENCES users(id),
+      recipient_email TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+      error TEXT,
+      message_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      event_type TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, event_type)
+    );
+    CREATE TABLE IF NOT EXISTS jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL CHECK (type IN ('send-notification', 'low-stock-scan', 'promo-expiry-scan')),
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'done', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+      next_run_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
   },
 ];
 

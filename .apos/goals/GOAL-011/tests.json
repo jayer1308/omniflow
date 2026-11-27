@@ -1,0 +1,64 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/notifications-acceptance.test.ts::AC-1 don xac nhan sinh job order.confirmed cho owner (don khong co khach)",
+      "tests/notifications-acceptance.test.ts::AC-1 don co khach co email sinh job cho ca khach va owner",
+      "tests/notifications-acceptance.test.ts::AC-1 don khong co customer_id hoac khach khong co email chi gui cho owner khong loi",
+      "tests/notifications-acceptance.test.ts::AC-1 don hoan tat sinh job order.completed va chay job 2 lan chi co 1 notification",
+      "tests/notifications-acceptance.test.ts::AC-1 don huy sinh job order.cancelled; gui lai cung trang thai no-op khong tao job moi",
+      "tests/notifications-acceptance.test.ts::AC-1 webhook paid chot sinh job payment.paid; webhook failed sinh job payment.failed",
+      "tests/notifications-acceptance.test.ts::AC-1 hoan tien sinh job payment.refunded cho owner va accountant",
+      "tests/notifications-acceptance.test.ts::AC-1 giao hang in_transit/delivered/failed sinh job shipment.shipped/delivered/failed",
+      "tests/notifications-acceptance.test.ts::AC-1 tra hang tao/duyet/tu choi/nhan sinh job return.requested/approved/rejected/received",
+      "tests/notifications-acceptance.test.ts::AC-1 GET notifications voi status la tra 400; PATCH preferences voi event_type la tra 400",
+      "tests/notifications-acceptance.test.ts::AC-1 noi dung email theo mau: subject/body chua ma don, message_id FakeEmailAdapter, khong chua thong tin the",
+      "tests/notifications-acceptance.test.ts::AC-1 buildNotificationContent truc tiep tra subject/body theo mau D29"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/notifications-acceptance.test.ts::AC-2 processDueJobs chay job send-notification pending thanh done va tao notification sent; job chua due khong chay",
+      "tests/notifications-acceptance.test.ts::AC-2 job fail lan 1 attempts 1 next_run_at +60s; lan 2 +120s; lan 3 failed (khong cho that)",
+      "tests/notifications-acceptance.test.ts::AC-2 scheduler dedupe: enqueueScanJob 2 lan cung ngay chi tao 1 job; ngay khac tao moi",
+      "tests/notifications-acceptance.test.ts::AC-2 low-stock-scan tao job stock.low dung SKU kho available min_stock shortage; cap du ton khong sinh; scan lai khong trung",
+      "tests/notifications-acceptance.test.ts::AC-2 promo-expiry-scan: ma het han trong 2 ngay duoc nhac; ma da het han va inactive khong nhac",
+      "tests/notifications-acceptance.test.ts::AC-2 khoi phuc job running ve pending khi khoi dong giu attempts next_run_at bang now",
+      "tests/notifications-acceptance.test.ts::AC-2 processDueJobs chay tuan tu theo created_at: job dau fail thi job sau van done"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/notifications-acceptance.test.ts::AC-3 PATCH preferences tat order.completed thi don hoan tat khong tao job cho user do",
+      "tests/notifications-acceptance.test.ts::AC-3 GET notifications phan trang va loc theo event_type status; GET jobs loc theo status type",
+      "tests/notifications-acceptance.test.ts::AC-3 POST jobs/run chay job due tra processed done failed dung so; job chua due khong chay",
+      "tests/notifications-acceptance.test.ts::AC-3 POST jobs/:id/retry dua job failed ve pending attempts 0 next_run_at now last_error NULL; retry job chua failed 400",
+      "tests/notifications-acceptance.test.ts::AC-3 can() view-notifications va view-jobs theo ma tran brief",
+      "tests/notifications-acceptance.test.ts::AC-3 can() run-jobs va manage-notification-preferences theo ma tran brief",
+      "tests/notifications-acceptance.test.ts::AC-3 RBAC 403 sales xem thong bao chi nhanh khac, sales xem job, warehouse xem thong bao khong phai ton kho, warehouse va accountant chay job",
+      "tests/notifications-acceptance.test.ts::AC-3 RBAC 403 user org A doc thong bao org B; org B khong thay job org A",
+      "tests/notifications-acceptance.test.ts::AC-3 audit job fail 3 lan dung 1 notification-failed + 1 job-failed, detail khong chua email khach hay noi dung email",
+      "tests/notifications-acceptance.test.ts::AC-3 gui thanh cong khong tang so ban ghi audit",
+      "tests/notifications-acceptance.test.ts::AC-3 preferences: owner/manager sua cho user trong org; sales sua cua nguoi khac 403; event_type la 400",
+      "tests/notifications-acceptance.test.ts::AC-3 warehouse chi xem thong bao stock.low kho duoc gan va job low-stock-scan; xem job khac 403"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/notifications-acceptance.test.ts::AC-4 demo flow don 250k counter xac nhan hoan tat thu 100k chay job notification order.completed + payment.paid sent",
+      "tests/notifications-acceptance.test.ts::AC-4 webhook paid gui 2 lan van chi chot 1 lan va chi co 1 job payment.paid (giu hanh vi GOAL-006)",
+      "tests/notifications-acceptance.test.ts::AC-4 hoan tien giu nguyen computePaymentSummary D22/D25 va sinh dung 1 job payment.refunded"
+    ]
+  }
+]

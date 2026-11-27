@@ -115,7 +115,24 @@ export class FakeShippingAdapter implements ShippingAdapter {
 }
 
 export class FakeEmailAdapter implements EmailAdapter {
+  /**
+   * Co gia lap loi gui mot lan, CHI dung trong test (GOAL-011, D29 — nhu
+   * D23 cua FakePaymentAdapter): lan send() ke tiep nem loi, sau do tu
+   * tat. Route production khong bao gio goi failNext(). EmailResult khong
+   * co truong status nen loi gui chi bieu hien duoc bang throw; runner
+   * bat loi nay de retry/backoff (R-5).
+   */
+  private static failNextFlag = false;
+
+  static failNext(): void {
+    FakeEmailAdapter.failNextFlag = true;
+  }
+
   send(to: string, subject: string, body: string): EmailResult {
+    if (FakeEmailAdapter.failNextFlag) {
+      FakeEmailAdapter.failNextFlag = false;
+      throw new Error('not implemented: FakeEmailAdapter send failed (simulated)');
+    }
     return {
       simulated: true,
       messageId: digest('FAKE-MAIL', `${to}:${subject}:${body}`),

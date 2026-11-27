@@ -123,7 +123,17 @@ export type Action =
   // sales chi chi nhanh minh, warehouse chi bao cao ton kho duoc gan;
   // xuat CSV: cung pham vi nhu xem, ghi audit 'export-report').
   | 'view-reports'
-  | 'export-reports';
+  | 'export-reports'
+  // GOAL-011 (STUB cua Tester): ma tran thong bao/job (docs/RBAC.md, D29).
+  // can() chua co case cho 4 action nay nen mac dinh tra false; Worker
+  // implement dung ma tran brief-011 yeu cau 11 (owner/manager toan org;
+  // sales chi thong bao chi nhanh minh, xem job -> 403; warehouse chi
+  // thong bao stock.low kho duoc gan + job low-stock-scan, chay job -> 403;
+  // accountant xem thong bao payment/refund toan org, chay job -> 403).
+  | 'view-notifications'
+  | 'manage-notification-preferences'
+  | 'view-jobs'
+  | 'run-jobs';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
