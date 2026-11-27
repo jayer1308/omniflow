@@ -1,6 +1,6 @@
 # GOAL-007 v1: OmniFlow co nghiep vu giao hang + tra hang tren don hang GOAL-005: yeu cau giao cho don completed qua adapter fake (ma van don deterministic, phi/ETA tu quote), cap nhat trang thai giao lap la no-op khong ghi event, sai thu tu bi tu choi; tra hang duyet/tu choi co ly do, nhan hang nhap lai kho dung so ban lai duoc (hang hong khong nhap kho), hoan tien qua dung duong GOAL-006; doi chieu don-thanh toan-kho sau tra dung so; RBAC theo ma tran giao/tra + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc giao/tra moi; yeu cau R-20 cua GOAL-004 duoc loai tru co ly do (out-of-scope)
 
-Status: verified
+Status: closed
 
 ```json
 {
