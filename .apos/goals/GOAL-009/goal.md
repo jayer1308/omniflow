@@ -1,6 +1,6 @@
 # GOAL-009 v1: OmniFlow co nghiep vu khuyen mai tren don hang GOAL-005: ma giam gia (UNIQUE theo org, chuan hoa UPPERCASE) loai % co cap hoac so tien co dinh, dieu kien ap dung (tong toi thieu, kenh, chi nhanh, thoi gian hieu luc, gioi han dung tong + moi khach); ap ma vao don draft (tinh lai tong sau giam, ghi ro ma + so tien giam tren don); luat chong giam voi diem GOAL-008 theo MOT luat duy nhat (tong giam = min(C + P, total), khong phu thuoc thu tu ap); huy don co ma thi hoan luot dung, tra hang/hoan tien thi KHONG; doi soat tru ca diem lan ma (outstanding = total - points_discount - promo_discount - paid_total), payment_status giu logic D22; lich su dung ma append-only; RBAC theo ma tran khuyen mai + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khuyen mai moi; yeu cau R-18 cua GOAL-007 duoc loai tru co ly do (out-of-scope)
 
-Status: verified
+Status: closed
 
 ```json
 {
