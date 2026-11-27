@@ -364,6 +364,41 @@ tin thẻ, KHÔNG chứa PII khách); xem JSON không ghi audit. RBAC báo cáo
 đầy đủ: `docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D28).
 KHÔNG lưu thông tin thẻ; không thêm màn hình báo cáo (GOAL-012).
 
+## Thông báo + công việc nền (GOAL-011)
+
+Sự kiện đơn (`order.confirmed/completed/cancelled`), thanh toán
+(`payment.paid/failed/refunded`), giao hàng (`shipment.shipped/
+delivered/failed`), trả hàng (`return.requested/approved/rejected/
+received`), tồn thấp (`stock.low`), mã sắp hết hạn
+(`promotion.expiring`) sinh job `send-notification` trong CÙNG
+transaction với cập nhật trạng thái gốc (hook ở `transitionOrderTx`,
+webhook, refund, shipment, return); người nhận: email khách (nếu có) +
+owner, thanh toán/hoàn tiền thêm accountant, trả hàng thêm sales chi
+nhánh đơn, tồn thấp thêm warehouse được gán kho + manager, mã sắp hết
+hạn thêm owner + manager; người nhận là user thì kiểm tra cài đặt nhận
+(thiếu dòng = bật). Gửi qua `FakeEmailAdapter` (`simulated: true`,
+không gửi email thật), log append-only vào `notifications`
+(`event_key` + người nhận chống trùng). Job chạy tuần tự qua
+`processDueJobs(db, now)`, retry tối đa 3 lần + backoff `60 ×
+2^(attempts-1)` giây (+60s, +120s), scheduler `setInterval` 60 phút/loại
+scan khi server chạy thật (dedupe theo `period_key` = ngày
+Asia/Ho_Chi_Minh), khôi phục job `running` về `pending` khi khởi động.
+Cài đặt nhận: `GET/PATCH /api/notification-preferences` (tự xem/sửa của
+mình; owner/manager sửa cho user trong org; `event_type` lạ → 400).
+Xem: `GET /api/notifications?event_type=&status=&from=&to=` +
+`GET /api/notifications/:id`, `GET /api/jobs?status=&type=` +
+`GET /api/jobs/:id` (kèm `total`/`page`/`limit`); chạy tay:
+`POST /api/jobs/run` (trả `{processed, done, failed}`),
+`POST /api/jobs/:id/retry` (failed → pending, attempts 0,
+`next_run_at` = now + audit `job-retried`; chưa failed → 400). Scan
+kích hoạt tay ngoài API bằng `OMNIFLOW_DB=<db> npx tsx
+scripts/notif-ops.ts low-stock-scan|promo-expiry-scan|fail-job`
+(`POST /api/jobs/run` chỉ chạy job due, không enqueue scan). Audit
+CHỈ thất bại cuối (`notification-failed`/`job-failed`, detail KHÔNG
+chứa nội dung email hay email khách) + retry tay. RBAC đầy đủ:
+`docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D29). Không
+thêm màn hình thông báo/job (GOAL-012).
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
@@ -410,12 +445,14 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (14 migration: 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng, 011 là thanh toán/hoàn tiền/lịch sử giao dịch, 012 là giao/trả, 013 là khách/CRM, 014 là khuyến mãi)
+- `src/db.ts` — mở DB + migration tuần tự (15 migration: 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng, 011 là thanh toán/hoàn tiền/lịch sử giao dịch, 012 là giao/trả, 013 là khách/CRM, 014 là khuyến mãi, 015 là thông báo + job)
 - `src/orders.ts` — đơn hàng: state machine, mã đơn, service tạo/chuyển
   trạng thái (giữ/giải phóng/xuất kho qua `applyMovement`, idempotency
   trong transaction)
 - `src/rbac.ts` — helper phân quyền `can()` + ma trận vai × thao tác × phạm vi
 - `src/reports.ts` — báo cáo + đối soát (GOAL-010, D28): hàm thuần tính từ bảng đã có, không bảng tổng riêng
+- `src/notifications.ts` — thông báo (GOAL-011, D29): mẫu email, tạo job send-notification, kiểm tra preferences, suy phạm vi từ event_key
+- `src/jobs.ts` — hàng đợi job trong tiến trình (GOAL-011, D29): `processDueJobs`, retry/backoff, 2 scan, khôi phục job running, scheduler 60 phút
 - `src/products.ts` — giá hiệu dụng fallback 8 bước + parse CSV (GOAL-003)
 - `src/seed.ts` — seed giả lập tối thiểu
 - `src/auth.ts` — bcrypt + session

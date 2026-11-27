@@ -930,3 +930,182 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   goal riêng và ghi rõ lý do), hoặc đổi ngữ nghĩa `payment_status`
   (qua `tests revise`), hoặc báo cáo đa org thật (thêm `org_id` vào
   các hàm thuần thay vì gate org triển khai).
+
+## D29 — Mô hình thông báo + công việc nền (GOAL-011, 28/11/2026)
+
+- Danh mục sự kiện (R-1): `order.confirmed` / `order.completed` /
+  `order.cancelled`; `payment.paid` / `payment.failed` /
+  `payment.refunded`; `shipment.shipped` / `shipment.delivered` /
+  `shipment.failed`; `return.requested` / `return.approved` /
+  `return.rejected` / `return.received`; `stock.low`;
+  `promotion.expiring`. Người nhận mặc định: đơn/thanh toán/giao/trả
+  → email khách (nếu đơn có `customer_id` và khách có email) + owner;
+  thanh toán/hoàn tiền → thêm accountant; trả hàng → thêm sales của chi
+  nhánh đơn; tồn thấp → user warehouse được gán kho đó + manager; mã sắp
+  hết hạn → owner + manager. Người nhận là user thì kiểm tra
+  `notification_preferences` lúc tạo job (thiếu dòng = BẬT; tắt → không
+  tạo job, không tạo notification, không tính failed); khách (email)
+  luôn gửi nếu có email.
+- Gửi qua `FakeEmailAdapter.send` (`simulated: true`, `messageId`
+  deterministic `FAKE-MAIL-<sha256 12 ký tự>`), log append-only vào
+  bảng `notifications` (migration 015): `org_id`, `event_key`,
+  `event_type`, `channel='email'`, `recipient_user_id` nullable,
+  `recipient_email` snapshot, `subject`, `body`, `status` sent/failed,
+  `error` nullable, `message_id`, `created_at`. KHÔNG gửi email thật.
+- `event_key` = `${event_type}:${entity}:${detail}`: vd
+  `order.completed:DH-20261128-0001`,
+  `stock.low:variant:12:warehouse:3:2026-11-28` (ngày Asia/Ho_Chi_Minh,
+  tối đa 1 lần/ngày/cặp),
+  `promotion.expiring:7:2026-11-30` (1 lần/mã/ngày hết hạn). Chống
+  trùng theo (event_key + người nhận): 1 job send-notification cho 1
+  người nhận; gửi lại cùng event_key + cùng người nhận → trả job đã có,
+  không tạo mới; gửi lại cùng trạng thái (no-op D24) → không tạo job.
+- Mẫu nội dung cố định từng loại (subject/body chứa mã đơn / số tiền /
+  SKU / tên kho / mã khuyến mãi tùy loại; số tiền ghi số nguyên không
+  định dạng — vd `250000` — để test đối chiếu chuỗi; KHÔNG chứa thông
+  tin thẻ, KHÔNG chứa PII thừa ngoài email đích đã snapshot):
+  đơn xác nhận/hoàn tất/hủy — `Đơn <mã> đã xác nhận/hoàn tất/bị hủy.
+  Tổng tiền: <total> VND.`; đã nhận tiền — `Đã nhận <amount> VND cho
+  đơn <mã>`; thanh toán thất bại — `Thanh toán đơn <mã> thất bại`;
+  hoàn tiền — `Đã hoàn tiền <amount> VND cho đơn <mã>`; giao hàng —
+  `Đơn <mã> đã giao cho đơn vị vận chuyển / đã giao thành công / giao
+  hàng thất bại`; trả hàng — `Yêu cầu trả hàng [mã trả] cho đơn <mã>
+  đã được tạo/duyệt/bị từ chối/đã nhận hàng`; tồn thấp —
+  `Tồn thấp: <SKU> tại <kho>` / `Sản phẩm <tên> (<SKU>) tại kho <kho>:
+  còn <available>, mức tối thiểu <min_stock>, thiếu <shortage>.`;
+  mã sắp hết hạn — `Mã <code> sắp hết hạn (<valid_to>)` / `Mã khuyến
+  mãi <code> hết hạn ngày <valid_to>. Đã dùng <used>/<limit>.`
+- Job queue trong tiến trình (R-4): bảng `jobs` (migration 015): `id`,
+  `type` ∈ send-notification/low-stock-scan/promo-expiry-scan, `payload`
+  JSON (send-notification: `event_key`, `event_type`,
+  `to_user_id`/`to_email`, `subject`, `body`; scan: `period_key`),
+  `status` ∈ pending/running/done/failed, `attempts` (mặc định 0),
+  `max_attempts` = 3, `next_run_at` (ISO UTC, mặc định now),
+  `last_error` nullable, `created_at`, `updated_at`. Runner
+  `processDueJobs(db, now)`: lấy job pending có `next_run_at <= now`
+  theo `created_at`, chạy TUẦN TỰ từng job, mỗi job trong transaction
+  riêng (running → done/failed/pending-lại + ghi log trong cùng
+  transaction). Trả `{processed, done, failed}` — `failed` đếm job lỗi
+  trong lần chạy này (kể cả job về pending chờ retry).
+- Retry + backoff (R-5): `max_attempts` = 3 (chốt). Job fail →
+  `attempts` + 1, về pending với `next_run_at` = now + `60 ×
+  2^(attempts-1)` giây (lần 1 fail → +60s, lần 2 fail → +120s); lần 3
+  fail → `failed` + `last_error` + audit `job-failed` +
+  `notification-failed`. Test KHÔNG chờ thật (đặt `next_run_at` trực
+  tiếp / `now` giả lập). Cơ chế giả lập lỗi gửi: `FakeEmailAdapter`
+  thêm `failNext()` static một lần như D23 — CHỈ dùng trong test (và
+  helper `scripts/notif-ops.ts` cho demo/smoke), route production
+  không bao giờ gọi.
+- Scheduler + scan (R-6/R-7/R-8): `setInterval` 60 phút/loại scan khi
+  server chạy thật (`src/server.ts` gọi `startNotificationScheduler`;
+  KHÔNG chạy trong test — test chỉ gọi `createApp`). Mỗi loại scan có
+  `period_key` = ngày hiện tại Asia/Ho_Chi_Minh; đã có job scan cùng
+  loại + cùng `period_key` ở pending/running/done thì KHÔNG tạo thêm
+  (kiểm tra trong transaction). low-stock-scan quét cặp
+  (biến thể, kho) ĐÃ CÓ dòng `stock_levels` với `available < min_stock`
+  (cặp chưa từng nhập kho không có dòng tồn thì không tính là cặp tồn
+  thấp — mỗi ngày tính lại từ dữ liệu gốc); mỗi cặp sinh 1 job
+  `stock.low` / 1 người nhận. promo-expiry-scan quét promotion `active`
+  có `valid_to` trong 3 ngày tới theo ngày Asia/Ho_Chi_Minh (đã hết hạn
+  thì không nhắc, `valid_to` NULL thì không nhắc); mỗi mã sinh 1 job
+  `promotion.expiring` / 1 người nhận; nội dung ghi `used_count` (số
+  usage `used`) / `usage_limit` (NULL → "không giới hạn").
+  `POST /api/jobs/run` chạy ngay job due (KHÔNG enqueue scan — test
+  khóa AC-3 đòi `processed` chính xác); scan kích hoạt tay ngoài API
+  bằng helper `scripts/notif-ops.ts` (mở cùng file DB, chạy cùng code
+  `src/jobs.ts`) cho demo/smoke.
+- Khôi phục khi khởi động (R-4): server start đưa mọi job `running` về
+  `pending` (`attempts` giữ nguyên, `next_run_at` = now) qua
+  `recoverRunningJobs(db, now)`.
+- Hook sự kiện (R-9): tạo job trong CÙNG transaction với cập nhật trạng
+  thái gốc — `transitionOrderTx` (confirmed/completed/cancelled;
+  `process` không sinh thông báo), `createPaymentTx` (chỉ thu trực
+  tiếp cash/bank_transfer chót `paid` ngay; thu qua cổng ở `requested`
+  chờ webhook), `processWebhookTx` (paid chót / failed — webhook lặp
+  hoặc đã trả thì không tạo job), `createRefundTx` (mọi refund tạo ra),
+  `updateShipmentTx` (in_transit → shipped, delivered, failed; gửi
+  lại cùng trạng thái là no-op, không tạo job), `createReturnTx`
+  (requested), `reviewReturnTx` (approved/rejected), `receiveReturnTx`
+  (received). Hook CHỈ THÊM tạo job, KHÔNG đổi hành vi đã khóa của
+  GOAL-005/006/007 (state machine, webhook chống trùng, hoàn tiền,
+  `computePaymentSummary` D22/D25).
+- Quyết định đã giao cho Worker (ghi rõ lựa chọn + lý do):
+  (a) Refund tạo qua luồng trả hàng (return-refund) CÓ sinh job
+  `payment.refunded`: brief R-9 ghi hook "(c) refund tạo (GOAL-006)"
+  được đọc theo nghĩa refund nào tạo ra cũng sinh job (kể cả qua trả
+  hàng) — `refundReturnTx` dùng lại đúng đường `createRefundTx` của
+  GOAL-006 nên hook đặt ở `createRefundTx` bao cả hai luồng; dedupe
+  theo (event_key + người nhận) nên nhiều payment hoàn chung một đơn
+  vẫn chỉ sinh 1 job/người nhận. Test khóa KHÔNG assert job cho luồng
+  này (ghi chú trong test), quyết định thuộc Worker theo R-9.
+  (b) Bảng `jobs` không có `org_id`, `notifications` không có
+  `branch_id`/`warehouse_id`: KHÔNG thêm cột mới — suy org/chi
+  nhánh/kho từ payload/event_key (`deriveEventScope` /
+  `deriveJobOrg` trong `src/notifications.ts`): mã đơn → tra đơn
+  (`org_id`/`branch_id`/`warehouse_id`, giới hạn theo org của bản
+  ghi khi biết trước vì mã đơn trùng nhau giữa 2 org là có thể);
+  `stock.low` → id kho trong event_key → tra kho; `promotion.expiring`
+  → id mã → tra khuyến mãi; job scan không gắn thực thể nào nên là
+  global theo `period_key` (owner/manager thấy mọi job scan,
+  warehouse chỉ thấy job low-stock-scan). Job send-notification không
+  suy được org (vd job test chèn tay với mã đơn giả) thì owner/manager
+  vẫn thấy (không chặn nhầm), còn kiểm tra ngoài org chỉ áp khi suy
+  được org khác.
+  (c) Chống trùng đổi từ `UNIQUE(event_key)` toàn cục (stub Tester)
+  sang `UNIQUE(org_id, event_key, recipient_email)` (migration 015):
+  stub sai theo hợp đồng test — cùng event_key gửi cho 2 người nhận
+  (owner + khách, warehouse + manager) PHẢI có 2 dòng notifications
+  (test khóa AC-2 đòi `notes.length == 2` cho 1 event_key
+  stock.low/promotion.expiring), nên UNIQUE toàn cục theo event_key
+  là không thể đúng; mặt khác mã đơn là số thứ tự theo từng org nên
+  2 org có thể trùng mã đơn — UNIQUE theo event_key sẽ làm mất log
+  của org thứ hai. Với UNIQUE mới, cùng event_key + cùng người nhận
+  trong 1 org vẫn chỉ có 1 bản ghi (dedupe giữ nguyên), khác người
+  nhận hoặc khác org thì ghi riêng. DB nào đã migrate 015 với
+  UNIQUE cũ thì giữ nguyên ràng buộc cũ (migration không chạy lại);
+  DB mới nhận UNIQUE mới.
+- Preferences (R-3): bảng `notification_preferences` (migration 015):
+  `user_id`, `event_type`, `enabled` (0/1),
+  `UNIQUE(user_id, event_type)`; thiếu dòng = BẬT (không seed dòng mặc
+  định). API `GET/PATCH /api/notification-preferences` (`user_id` vắng
+  = chính mình; `event_type` lạ → 400; `enabled` không phải boolean →
+  400); GET trả đủ 15 loại với `enabled` boolean.
+- API (R-10): `GET /api/notifications?event_type=&status=&from=&to=`
+  + `GET /api/notifications/:id`; `GET /api/jobs?status=&type=` +
+  `GET /api/jobs/:id`; `POST /api/jobs/run` (trả `{processed, done,
+  failed}`); `POST /api/jobs/:id/retry` (failed → pending, attempts 0,
+  `next_run_at` = now, `last_error` NULL + audit `job-retried`; chưa
+  failed → 400; không thấy → 404). List kèm `total`/`page`/`limit`
+  (page mặc định 1, limit mặc định 20 tối đa 100); `status`/`event_type`
+  /`type` lạ → 400; ngoài org → 403. Job trả cho client có `payload`
+  đã giải JSON.
+- RBAC (R-11): `can()` thêm 4 actions `view-notifications` /
+  `manage-notification-preferences` / `view-jobs` / `run-jobs`:
+  owner/manager toàn org (xem + chạy job + retry); sales chỉ xem thông
+  báo thuộc chi nhánh mình (thông báo không gắn chi nhánh thì sales
+  không thấy; xem job → 403); warehouse chỉ xem thông báo `stock.low`
+  của kho được gán + job low-stock-scan (xem job khác → 403, chạy job
+  → 403); accountant xem thông báo payment/refund toàn org (chỉ xem,
+  chạy job → 403). Preferences: user tự xem/sửa của mình; owner/manager
+  sửa cho user trong org; sales/warehouse/accountant sửa của người khác
+  → 403. Mọi endpoint qua `requireAuth` + `can()` (vai sai/sai chi
+  nhánh/kho/ngoài org → 403).
+- Audit (R-12): CHỈ thất bại cuối + retry tay — gửi thất bại cuối
+  (`notification-failed`, detail `{event_key, event_type,
+  recipient_user_id (nếu có), error}` — KHÔNG nội dung email, KHÔNG
+  email khách), job failed cuối (`job-failed`, detail `{job_id,
+  job_type, last_error}`), retry tay (`job-retried`, detail `{job_id,
+  job_type}`). Gửi thành công KHÔNG ghi audit. Xem log theo luật
+  GOAL-002 (`GET /api/audit-log`).
+- Lý do: job trong tiến trình + `setInterval` thay vì Redis/cron hệ
+  thống vì quy mô giả lập local (R-18 loại trừ vĩnh viễn); dedupe 2
+  lớp (job theo event_key + người nhận, notification theo
+  org/event_key/email) vì runner chạy tuần tự vẫn có thể gặp job scan
+  chạy lại cùng ngày; suy phạm vi từ event_key thay vì thêm cột vì
+  schema 3 bảng đã chốt ở migration 015 và event_key đã mang đủ định
+  danh thực thể (mã đơn / id kho / id mã).
+- Đổi khi: cần gửi thật (thêm adapter + goal riêng, KHÔNG dùng
+  FakeEmailAdapter cho production), cần dedupe theo (event_key +
+  recipient_user_id) thay vì email (khi user đổi email giữa enqueue
+  và gửi), hoặc job scan cần gắn org (thêm `org_id` vào bảng `jobs`
+  qua migration mới — phải qua goal riêng và ghi rõ lý do).
