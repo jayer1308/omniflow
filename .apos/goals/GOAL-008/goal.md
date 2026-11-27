@@ -1,16 +1,16 @@
-# GOAL-008 v1: OmniFlow co nghiep vu khach hang + CRM tren don hang GOAL-005: ho so khach (chi nhanh chinh, dien thoai duy nhat trong org) + lich su mua (chi don completed) + tich diem 1 diem/10.000d khi don completed va doi diem 1 diem=100d tru tien don moi (khong het han, khong am, idempotency trong transaction) + ghi chu cham soc append-only + phan khuc tinh o service (VIP/ngu quen/thuong xuyen/moi, uu tien VIP truoc) + tim/loc khach theo ten/dien thoai/phan khuc/chi nhanh + hop nhat ho so trung co xac nhan (khong mat diem/lich su) + xuat du lieu khach va xoa chi khi chua co don, khong PII trong log; RBAC theo ma tran khach/CRM + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khach/CRM moi; yeu cau R-16 cua GOAL-006 duoc loai tru co ly do (out-of-scope)
+# GOAL-008 v2: OmniFlow co nghiep vu khach hang + CRM tren don hang GOAL-005: ho so khach (chi nhanh chinh, dien thoai duy nhat trong org) + lich su mua (chi don completed) + tich diem 1 diem/10.000d khi don completed va doi diem 1 diem=100d tru tien don moi (khong het han, khong am, idempotency trong transaction) + ghi chu cham soc append-only + phan khuc tinh o service (VIP/ngu quen/thuong xuyen/moi, uu tien VIP truoc) + tim/loc khach theo ten/dien thoai/phan khuc/chi nhanh + hop nhat ho so trung co xac nhan (khong mat diem/lich su) + xuat du lieu khach va xoa chi khi chua co don, khong PII trong log; RBAC theo ma tran khach/CRM + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khach/CRM moi; yeu cau R-16 va R-17 cua GOAL-006 duoc loai tru co ly do (out-of-scope)
 
 Status: approved
 
 ```json
 {
   "id": "GOAL-008",
-  "version": 1,
-  "outcome": "OmniFlow co nghiep vu khach hang + CRM tren don hang GOAL-005: ho so khach (chi nhanh chinh, dien thoai duy nhat trong org) + lich su mua (chi don completed) + tich diem 1 diem/10.000d khi don completed va doi diem 1 diem=100d tru tien don moi (khong het han, khong am, idempotency trong transaction) + ghi chu cham soc append-only + phan khuc tinh o service (VIP/ngu quen/thuong xuyen/moi, uu tien VIP truoc) + tim/loc khach theo ten/dien thoai/phan khuc/chi nhanh + hop nhat ho so trung co xac nhan (khong mat diem/lich su) + xuat du lieu khach va xoa chi khi chua co don, khong PII trong log; RBAC theo ma tran khach/CRM + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khach/CRM moi; yeu cau R-16 cua GOAL-006 duoc loai tru co ly do (out-of-scope)",
+  "version": 2,
+  "outcome": "OmniFlow co nghiep vu khach hang + CRM tren don hang GOAL-005: ho so khach (chi nhanh chinh, dien thoai duy nhat trong org) + lich su mua (chi don completed) + tich diem 1 diem/10.000d khi don completed va doi diem 1 diem=100d tru tien don moi (khong het han, khong am, idempotency trong transaction) + ghi chu cham soc append-only + phan khuc tinh o service (VIP/ngu quen/thuong xuyen/moi, uu tien VIP truoc) + tim/loc khach theo ten/dien thoai/phan khuc/chi nhanh + hop nhat ho so trung co xac nhan (khong mat diem/lich su) + xuat du lieu khach va xoa chi khi chua co don, khong PII trong log; RBAC theo ma tran khach/CRM + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khach/CRM moi; yeu cau R-16 va R-17 cua GOAL-006 duoc loai tru co ly do (out-of-scope)",
   "source": {
     "path": "brief-008.md",
-    "sha256": "453d59ed25b881d3497434e494ee5ca2d0f3d0493a8d721b8dc0b4cbccfb01b9",
-    "capturedAt": "2026-11-27T04:20:34.678Z",
+    "sha256": "1096245ab8319996180e7a82f65599d1190491a46acc89c3efdc211a5e96cb71",
+    "capturedAt": "2026-11-27T04:23:00.174Z",
     "origin": "human"
   },
   "requirements": [
@@ -171,6 +171,20 @@ Status: approved
         "kind": "out-of-scope"
       },
       "exclusionReason": "Ngoài phạm vi vĩnh viễn của dự án giả lập này; deploy/VPS ngoài phạm vi local-only (D9); CI chờ user cấp scope workflow"
+    },
+    {
+      "id": "R-22",
+      "sourceSpan": "dòng 327–328 (brief-006.md)",
+      "adopts": {
+        "sourceSha256": "d3721a8812fccf7a526b1aebe77d2422a5001c1990065724601563c638fc6eb1",
+        "requirementId": "R-17"
+      },
+      "text": "Khách hàng + CRM (GOAL-008): không có bảng khách hàng, không lưu phương thức thanh toán của khách, không lịch sử thanh toán theo khách.",
+      "disposition": "excluded",
+      "exclusion": {
+        "kind": "out-of-scope"
+      },
+      "exclusionReason": "R-17 chỉ là câu phủ định phạm vi của GOAL-006 (nói GOAL-006 không làm CRM), không phải một yêu cầu dương cần implement. Toàn bộ phạm vi CRM mà nó nhắc tới đã được sở hữu bởi requirements riêng R-1..R-15 của GOAL-008 (hồ sơ khách, lịch sử mua, điểm, ghi chú, phân khúc); không còn yêu cầu nào chưa được sở hữu. Adopt R-17 vào GOAL-008 sẽ nhận sai phạm vi (nhận một câu phủ định làm tiêu chí) nên loại trừ có lý do."
     }
   ],
   "scope": [
@@ -186,7 +200,8 @@ Status: approved
   "exclusions": [
     "Khuyến mãi (GOAL-009), báo cáo/đối soát tổng hợp (GOAL-010), thông báo (GOAL-011), UI tổng quan (GOAL-012) — thuộc goal sau, không làm trong GOAL-008.",
     "Đơn vị vận chuyển thật / giao hàng thật, tài khoản hãng vận chuyển — ngoài phạm vi vĩnh viễn của dự án giả lập này; deploy production/VPS (ngoài phạm vi, local-only), CI workflow (chờ user cấp scope workflow).",
-    "Yêu cầu R-16 của GOAL-006 được loại trừ có lý do (out-of-scope) trong goal này — xem requirement R-16; không adopt vì toàn bộ phạm vi giao/trả của R-16 đã được sở hữu bởi requirements riêng R-1..R-15 của GOAL-007 (đã implement + kiểm chứng đầy đủ), deferral gộp này giờ là thừa; adopt vào GOAL-008 sẽ nhận sai phạm vi (khách hàng + CRM, không phải giao/trả)."
+    "Yêu cầu R-16 của GOAL-006 được loại trừ có lý do (out-of-scope) trong goal này — xem requirement R-16; không adopt vì toàn bộ phạm vi giao/trả của R-16 đã được sở hữu bởi requirements riêng R-1..R-15 của GOAL-007 (đã implement + kiểm chứng đầy đủ), deferral gộp này giờ là thừa; adopt vào GOAL-008 sẽ nhận sai phạm vi (khách hàng + CRM, không phải giao/trả).",
+    "Yêu cầu R-17 của GOAL-006 được loại trừ có lý do (out-of-scope) trong goal này — xem requirement R-22; R-17 chỉ là câu phủ định phạm vi của GOAL-006, phạm vi CRM đã được sở hữu bởi requirements riêng R-1..R-15 của GOAL-008."
   ],
   "acceptance": [
     {
