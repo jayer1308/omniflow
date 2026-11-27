@@ -1,0 +1,66 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/shipments-returns-acceptance.test.ts::AC-1 migration 012 tao du 5 bang giao/tra + cot + UNIQUE/CHECK, giu du lieu cu",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 yeu cau giao 201 requested, fee/eta tu quote, ma van don deterministic, 1 event + 1 audit",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 chi don completed moi duoc giao: draft/confirmed/cancelled -> 400",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 moi don toi da 1 shipment chua cuoi: yeu cau lan 2 -> 400, khong tao moi",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 giao lai sau khi shipment cu failed: 201, ma van don moi khac ma cu",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 FakeShippingAdapter.trackingRef deterministic: cung input cung ma, khac shipment khac ma",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 idempotency yeu cau giao: gui lai cung key -> replayed true, khong tao shipment moi",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 yeu cau giao sai dau vao 400, don khong ton tai 404, ngoai org 403",
+      "tests/shipments-returns-acceptance.test.ts::AC-1 phi theo khoi luong tong so luong x 500g + ETA Ha Noi 1 ngay, don van completed"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/shipments-returns-acceptance.test.ts::AC-2 in_transit roi delivered 200, events theo thu tu thoi gian tang dan",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 gui lai cung trang thai 200 no-op: khong tao event moi, so event khong doi",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 chuyen sai thu tu requested -> delivered 400, khong doi gi, khong ghi event",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 khong chuyen nguoc tu delivered/failed: delivered -> in_transit 400, failed -> in_transit 400",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 failed thieu reason 400; co reason 200 va la trang thai cuoi",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 cap nhat dong thoi in_transit roi delivered: khong ghi nhan sai thu tu",
+      "tests/shipments-returns-acceptance.test.ts::AC-2 cap nhat trang thai 404/403/400 + shipment_events append-only"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/shipments-returns-acceptance.test.ts::AC-3 yeu cau tra 201 requested, ma TH-YYYYMMDD-NNNN, unit_price snapshot, 1 event + 1 audit",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 yeu cau tra sai: don chua completed, bien the ngoai don, vuot tich luy, trung bien the, dau vao sai",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 duyet/tu choi: approve 200, reject sau approve 400, reject thieu reason 400, approve tu trang thai khac 400",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 tu choi 200 + ly do, yeu cau bi tu choi khong tinh vao tong tra tich luy",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 nhan hang: resalable nhap lai kho dung so, damaged khong nhap kho, khong ghi movement",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 nhan hang chi tu approved: nhan tu requested/received -> 400",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 hoan tien tra hang 200 dung so ca resalable lan damaged, qua bang refunds GOAL-006",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 hoan vuot so con hoan duoc -> 400, khong tao refund nao, return o lai received",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 hoan tien chi tu received: hoan tu requested/approved/refunded -> 400",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 doi chieu sau tra day du: payments + stock + don khop nhau ca 3 mat",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 idempotency tra hang: tao/duyet/nhan/hoan gui lai cung key -> replayed true, khong tao moi",
+      "tests/shipments-returns-acceptance.test.ts::AC-3 nhan hang / hoan tien dong thoi 2 lan: chi 1 lan thuc thi"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/shipments-returns-acceptance.test.ts::AC-4 can() 8 actions giao/tra theo dung ma tran brief",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 RBAC 403 qua HTTP: sales yeu cau giao, accountant cap nhat giao, warehouse yeu cau tra, sales duyet/hoan, warehouse nhan ngoai kho gan",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 RBAC xem 403: sales xem shipment/return don ngoai chi nhanh, user org A doc shipment/return org B",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 RBAC duong: warehouse dung kho yeu cau giao 200, sales dung chi nhanh yeu cau tra 200, accountant hoan tien tra hang 200",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 audit log giao/tra day du + khong chua thong tin the, sales xem log 403",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 events day du dung thu tu toan luong giao + tra, gui lap khong tao event thua",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 GET danh sach + chi tiet shipments/returns kem items + events, 404 khi khong ton tai",
+      "tests/shipments-returns-acceptance.test.ts::AC-4 khong co endpoint DELETE shipment/return, khong sua/xoa return_events"
+    ]
+  }
+]

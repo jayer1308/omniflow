@@ -3527,5 +3527,32 @@ export function createApp(db: DatabaseSync): Express {
     });
   });
 
+  // ---------- Giao hang + tra hang (GOAL-007) — STUB cho Tester ----------
+  // Worker thay bang logic that: hien tai moi endpoint giao/tra tra 501
+  // "not implemented" de test acceptance DO dung ly do. Route DELETE
+  // shipment/return / sua-xoa lich su giao/tra cung la stub 501 (khong phai
+  // 404/405) de test "khong co endpoint" DO tren stub va xanh khi Worker
+  // bo route di (Express tra 404 mac dinh).
+  const shipReturnNotImplemented = (_req: TenantRequest, res: Response): void => {
+    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
+  };
+  app.post('/api/orders/:id/shipments', shipReturnNotImplemented);
+  app.post('/api/shipments/:id/status', shipReturnNotImplemented);
+  app.get('/api/orders/:id/shipments', shipReturnNotImplemented);
+  app.get('/api/shipments/:id', shipReturnNotImplemented);
+  app.delete('/api/shipments/:id', shipReturnNotImplemented);
+  app.patch('/api/shipments/:id/events/:eventId', shipReturnNotImplemented);
+  app.delete('/api/shipments/:id/events/:eventId', shipReturnNotImplemented);
+  app.post('/api/orders/:id/returns', shipReturnNotImplemented);
+  app.post('/api/returns/:id/approve', shipReturnNotImplemented);
+  app.post('/api/returns/:id/reject', shipReturnNotImplemented);
+  app.post('/api/returns/:id/receive', shipReturnNotImplemented);
+  app.post('/api/returns/:id/refund', shipReturnNotImplemented);
+  app.get('/api/orders/:id/returns', shipReturnNotImplemented);
+  app.get('/api/returns/:id', shipReturnNotImplemented);
+  app.delete('/api/returns/:id', shipReturnNotImplemented);
+  app.patch('/api/returns/:id/events/:eventId', shipReturnNotImplemented);
+  app.delete('/api/returns/:id/events/:eventId', shipReturnNotImplemented);
+
   return app;
 }

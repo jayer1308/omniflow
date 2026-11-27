@@ -101,6 +101,15 @@ export class FakeShippingAdapter implements ShippingAdapter {
       reference: digest('FAKE-SHIP', `${weightGrams}:${destination}`),
     };
   }
+
+  /**
+   * Ma van don deterministic (GOAL-007) — STUB cho Tester: Worker dien
+   * logic that (digest PHAI co shipmentId, vi du
+   * `FAKE-TRK-<sha256(orderCode:carrier:shipmentId) 12 ky tu dau>`).
+   */
+  trackingRef(_orderCode: string, _carrier: string, _shipmentId: number): string {
+    throw new Error('not implemented');
+  }
 }
 
 export class FakeEmailAdapter implements EmailAdapter {
