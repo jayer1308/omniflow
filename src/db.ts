@@ -286,6 +286,45 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );`,
   },
+  {
+    // GOAL-006: thanh toan + hoan tien + lich su giao dich (D22).
+    // payments: gateway_reference UNIQUE khi co gia tri (NULL khong xung
+    // dot tren SQLite); refunds: ban ghi rieng, khong sua payment goc;
+    // payment_events append-only (chi INSERT, khong API sua/xoa).
+    version: 11,
+    sql: `CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      method TEXT NOT NULL CHECK (method IN ('cash', 'bank_transfer', 'gateway')),
+      amount INTEGER NOT NULL CHECK (amount > 0),
+      currency TEXT NOT NULL DEFAULT 'VND',
+      status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'paid', 'failed', 'refunded', 'partially_refunded')),
+      gateway_reference TEXT UNIQUE,
+      received_by INTEGER NOT NULL REFERENCES users(id),
+      received_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS refunds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES payments(id),
+      amount INTEGER NOT NULL CHECK (amount > 0),
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('requested', 'completed', 'failed')),
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS payment_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES payments(id),
+      event_type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id),
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

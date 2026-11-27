@@ -25,9 +25,34 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền)
 ```
+
+## Thanh toán + hoàn tiền (GOAL-006)
+
+Thu tiền mặt/chuyển khoản → `paid` ngay; thu qua cổng fake → `requested`
++ `gateway_reference` duy nhất theo giao dịch (`FAKE-PAY-<hash>`, gọi
+`FakePaymentAdapter.charge` với mã `${orderCode}:${paymentId}`), webhook
+giả lập chốt `paid`/`failed` đúng một lần dù gửi lặp/trễ/sai thứ tự;
+hoàn tiền là bản ghi riêng (`refunds`), tổng hoàn không bao giờ vượt số
+đã trả (kiểm tra trong `BEGIN IMMEDIATE`); đối soát từng đơn tính ở
+service (`order_total`/`paid_total`/`refunded_total`/`outstanding`/
+`payment_status`: `unpaid`/`partially_paid`/`paid`/`overpaid`/`refunded`);
+lịch sử giao dịch append-only (`payment_events`, cũ nhất trước); RBAC
+thanh toán theo vai + phạm vi chi nhánh/kho; audit log mọi thao tác
+(webhook có `user_id` NULL). KHÔNG lưu thông tin thẻ. Xem `docs/RBAC.md`
+(ma trận thanh toán) và `docs/DECISIONS.md` (D22, D23). Endpoint chính:
+`POST /api/orders/:id/payments`, `GET /api/orders/:id/payments`,
+`GET /api/payments/:id`, `POST /api/payments/:id/refunds`,
+`POST /api/payments/webhook` (không qua session — xác thực bằng header
+`X-Fake-Signature` = sha256 của
+`` `${gateway_reference}:${status}:${amount}:${secret}` ``, secret qua
+biến môi trường `OMNIFLOW_WEBHOOK_SECRET`; sai/thiếu chữ ký → 401, thiếu
+secret → 503). Idempotency: header `Idempotency-Key` hoặc
+`idempotency_key` trong body, tên miền `payment:create:<key>` /
+`payment:refund:<key>`, gửi lại trả `replayed: true`. Không có DELETE
+payment, không có API sửa/xóa lịch sử giao dịch.
 
 ## Đơn hàng đa kênh + vòng đời (GOAL-005)
 

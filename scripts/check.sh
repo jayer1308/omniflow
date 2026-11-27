@@ -49,6 +49,7 @@ smoke() {
   export OMNIFLOW_DB="$tmpdir/smoke.db"
   export OMNIFLOW_SEED_OWNER_PASSWORD="$owner_pass"
   export OMNIFLOW_SEED_STAFF_PASSWORD="$staff_pass"
+  export OMNIFLOW_WEBHOOK_SECRET="$(node -e "console.log(require('crypto').randomBytes(16).toString('hex'))")"
   export PORT="$port"
   npm run seed >/dev/null 2>&1 || return 1
   (npx tsx src/server.ts >"$tmpdir/server.log" 2>&1 & echo $! >"$tmpdir/pid")
@@ -409,11 +410,74 @@ smoke() {
   ord_lvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$wha_id&variant_id=$var_id")" || return 1
   echo "$ord_lvl" | grep -q '"on_hand":50' || { echo "ton cuoi sau race don: $ord_lvl"; return 1; }
   echo "$ord_lvl" | grep -q '"reserved":50' || { echo "giu cuoi sau race don: $ord_lvl"; return 1; }
+  # Thanh toan + hoan tien (GOAL-006): thu tien mat mot phan -> thu qua cong
+  # -> webhook paid chot -> webhook lap bi bo qua -> webhook sai chu ky 401
+  # -> hoan mot phan -> doi soat dung so -> idempotency gui lai khong tao
+  # payment moi -> RBAC 403 (warehouse tao, sales hoan) -> DELETE 404.
+  local pay1 pay1_id pay2 pay_ref pay_sig pay_res dup_res bad_code
+  local refund_res list_res idem_pay idem_replay list2
+  pay1="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":400000}' \
+    "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$pay1" | grep -q '"status":"paid"' || { echo "thu tien mat tra ve: $pay1"; return 1; }
+  echo "$pay1" | grep -q '"paid_total":400000' || { echo "doi soat sau thu mat sai: $pay1"; return 1; }
+  echo "$pay1" | grep -q '"payment_status":"partially_paid"' || { echo "trang thai sau thu mat sai: $pay1"; return 1; }
+  pay1_id="$(echo "$pay1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).payment.id))")"
+  pay2="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"gateway","amount":300000}' \
+    "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$pay2" | grep -q '"status":"requested"' || { echo "thu qua cong tra ve: $pay2"; return 1; }
+  pay_ref="$(echo "$pay2" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).payment.gateway_reference))")"
+  echo "$pay_ref" | grep -q '^FAKE-PAY-' || { echo "gateway_reference sai: $pay_ref"; return 1; }
+  pay_sig="$(node -e "console.log(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$pay_ref:paid:300000:$OMNIFLOW_WEBHOOK_SECRET")"
+  pay_res="$(curl -fsS -H 'Content-Type: application/json' -H "X-Fake-Signature: $pay_sig" \
+    -d "{\"gateway_reference\":\"$pay_ref\",\"status\":\"paid\",\"amount\":300000}" \
+    "http://127.0.0.1:$port/api/payments/webhook")" || return 1
+  echo "$pay_res" | grep -q '"status":"paid"' || { echo "webhook paid tra ve: $pay_res"; return 1; }
+  dup_res="$(curl -fsS -H 'Content-Type: application/json' -H "X-Fake-Signature: $pay_sig" \
+    -d "{\"gateway_reference\":\"$pay_ref\",\"status\":\"paid\",\"amount\":300000}" \
+    "http://127.0.0.1:$port/api/payments/webhook")" || return 1
+  echo "$dup_res" | grep -q '"duplicate":true' || { echo "webhook lap khong duplicate: $dup_res"; return 1; }
+  echo "$dup_res" | grep -q '"paid_total":700000' || { echo "webhook lap doi tong: $dup_res"; return 1; }
+  bad_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'X-Fake-Signature: 0000000000000000000000000000000000000000000000000000000000000000' \
+    -d "{\"gateway_reference\":\"$pay_ref\",\"status\":\"paid\",\"amount\":300000}" \
+    "http://127.0.0.1:$port/api/payments/webhook")"
+  [ "$bad_code" = "401" ] || { echo "webhook sai chu ky tra ve HTTP $bad_code, mong 401"; return 1; }
+  refund_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"amount":200000,"reason":"hoan smoke"}' \
+    "http://127.0.0.1:$port/api/payments/$pay1_id/refunds")" || return 1
+  echo "$refund_res" | grep -q '"status":"completed"' || { echo "hoan tien tra ve: $refund_res"; return 1; }
+  echo "$refund_res" | grep -q '"paid_total":500000' || { echo "doi soat sau hoan sai: $refund_res"; return 1; }
+  echo "$refund_res" | grep -q '"refunded_total":200000' || { echo "tong hoan sai: $refund_res"; return 1; }
+  echo "$refund_res" | grep -q '"outstanding":500000' || { echo "con thieu sau hoan sai: $refund_res"; return 1; }
+  list_res="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$list_res" | grep -q '"payment_status":"partially_paid"' || { echo "trang thai doi soat sai: $list_res"; return 1; }
+  idem_pay="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-pay-1' -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":50000}' \
+    "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$idem_pay" | grep -q '"status":"paid"' || { echo "tao payment idem lan 1 tra ve: $idem_pay"; return 1; }
+  idem_replay="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-pay-1' -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":50000}' \
+    "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$idem_replay" | grep -q '"replayed":true' || { echo "gui lai payment khong replay: $idem_replay"; return 1; }
+  list2="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/orders/$ord1_id/payments")" || return 1
+  echo "$list2" | grep -q '"paid_total":550000' || { echo "gui lai payment van tinh them: $list2"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":1000}' \
+    "http://127.0.0.1:$port/api/orders/$ord1_id/payments")"
+  [ "$code" = "403" ] || { echo "warehouse tao payment tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d '{"amount":1000,"reason":"sales hoan"}' \
+    "http://127.0.0.1:$port/api/payments/$pay1_id/refunds")"
+  [ "$code" = "403" ] || { echo "sales hoan tien tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE \
+    "http://127.0.0.1:$port/api/payments/$pay1_id")"
+  [ "$code" = "404" ] || { echo "DELETE payment tra ve HTTP $code, mong 404"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404)"
 }
 step "smoke server" smoke
 

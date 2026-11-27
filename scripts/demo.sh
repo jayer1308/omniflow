@@ -40,6 +40,7 @@ STAFF_PASS="$(node -e "console.log(require('crypto').randomBytes(12).toString('b
 export OMNIFLOW_DB="$TMPDIR_DEMO/demo.db"
 export OMNIFLOW_SEED_OWNER_PASSWORD="$OWNER_PASS"
 export OMNIFLOW_SEED_STAFF_PASSWORD="$STAFF_PASS"
+export OMNIFLOW_WEBHOOK_SECRET="$(node -e "console.log(require('crypto').randomBytes(16).toString('hex'))")"
 export PORT="$PORT_DEMO"
 
 demo_step "seed du lieu gia lap" npm run seed
@@ -553,6 +554,103 @@ don_rbac() {
   { [ "$code" = "403" ] || [ "$code" = "404" ]; } || { echo "tao don kho org B tra ve HTTP $code, mong 403/404"; return 1; }
 }
 demo_step "don: warehouse tao don bi 403, sales xu ly don bi 403, tao don kho org B bi 403/404" don_rbac
+
+# Thanh toan + hoan tien (GOAL-006): thu tien mat mot phan -> thu qua cong
+# -> webhook paid chot -> webhook lap bi bo qua -> hoan mot phan -> doi
+# soat dung so -> idempotency gui lai khong tao payment moi -> RBAC 403
+# (warehouse tao, sales hoan) + webhook sai chu ky 401. Dung don ORD1
+# (total 320000, da hoan tat) — thanh toan khong doi trang thai don.
+PAY1_FILE="$TMPDIR_DEMO/pay1.txt"
+PAY2_FILE="$TMPDIR_DEMO/pay2.txt"
+PAYREF_FILE="$TMPDIR_DEMO/payref.txt"
+
+thanh_toan_tien_mat() {
+  local id res
+  id="$(cat "$ORD1_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$res" | grep -q '"status":"paid"' || { echo "thu tien mat tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"paid_total":100000' || { echo "doi soat sau thu mat sai: $res"; return 1; }
+  echo "$res" | grep -q '"outstanding":220000' || { echo "con thieu sau thu mat sai: $res"; return 1; }
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).payment.id))" > "$PAY1_FILE"
+}
+demo_step "thanh toan: thu tien mat 100000 -> paid ngay, con thieu 220000" thanh_toan_tien_mat
+
+thanh_toan_gateway_webhook() {
+  local id res ref sig paid dup
+  id="$(cat "$ORD1_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"gateway","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$res" | grep -q '"status":"requested"' || { echo "thu qua cong tra ve: $res"; return 1; }
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).payment.id))" > "$PAY2_FILE"
+  ref="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).payment.gateway_reference))")"
+  echo "$ref" | grep -q '^FAKE-PAY-' || { echo "gateway_reference sai: $ref"; return 1; }
+  echo "$ref" > "$PAYREF_FILE"
+  sig="$(node -e "console.log(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$ref:paid:100000:$OMNIFLOW_WEBHOOK_SECRET")"
+  paid="$(curl -fsS -H 'Content-Type: application/json' -H "X-Fake-Signature: $sig" \
+    -d "{\"gateway_reference\":\"$ref\",\"status\":\"paid\",\"amount\":100000}" \
+    "http://127.0.0.1:$PORT_DEMO/api/payments/webhook")"
+  echo "$paid" | grep -q '"status":"paid"' || { echo "webhook paid tra ve: $paid"; return 1; }
+  echo "$paid" | grep -q '"paid_total":200000' || { echo "doi soat sau webhook sai: $paid"; return 1; }
+  dup="$(curl -fsS -H 'Content-Type: application/json' -H "X-Fake-Signature: $sig" \
+    -d "{\"gateway_reference\":\"$ref\",\"status\":\"paid\",\"amount\":100000}" \
+    "http://127.0.0.1:$PORT_DEMO/api/payments/webhook")"
+  echo "$dup" | grep -q '"duplicate":true' || { echo "webhook lap khong duplicate: $dup"; return 1; }
+  echo "$dup" | grep -q '"paid_total":200000' || { echo "webhook lap doi tong: $dup"; return 1; }
+}
+demo_step "thanh toan: thu qua cong -> webhook paid chot, gui lap duplicate:true, tong chi tinh 1 lan" thanh_toan_gateway_webhook
+
+thanh_toan_hoan_tien() {
+  local pay1 res
+  pay1="$(cat "$PAY1_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"amount":50000,"reason":"hoan demo"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/payments/$pay1/refunds")"
+  echo "$res" | grep -q '"status":"completed"' || { echo "hoan tien tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"paid_total":150000' || { echo "doi soat sau hoan sai: $res"; return 1; }
+  echo "$res" | grep -q '"refunded_total":50000' || { echo "tong hoan sai: $res"; return 1; }
+  echo "$res" | grep -q '"outstanding":170000' || { echo "con thieu sau hoan sai: $res"; return 1; }
+  echo "$res" | grep -q '"payment_status":"partially_paid"' || { echo "trang thai sau hoan sai: $res"; return 1; }
+}
+demo_step "thanh toan: hoan mot phan 50000 -> completed, paid_total 150000, refunded_total 50000" thanh_toan_hoan_tien
+
+thanh_toan_idempotency() {
+  local id first second list
+  id="$(cat "$ORD1_FILE")"
+  first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-pay-1' -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":10000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$first" | grep -q '"status":"paid"' || { echo "tao payment idem lan 1 tra ve: $first"; return 1; }
+  second="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-pay-1' -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":10000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$second" | grep -q '"replayed":true' || { echo "gui lai payment khong replay: $second"; return 1; }
+  list="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$list" | grep -q '"paid_total":160000' || { echo "gui lai payment van tinh them: $list"; return 1; }
+}
+demo_step "thanh toan: gui lai cung idempotency key tra replayed, khong tao payment moi" thanh_toan_idempotency
+
+thanh_toan_rbac() {
+  local id pay1 code ref
+  id="$(cat "$ORD1_FILE")"
+  pay1="$(cat "$PAY1_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":1000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  [ "$code" = "403" ] || { echo "warehouse tao payment tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"amount":1000,"reason":"sales hoan"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/payments/$pay1/refunds")"
+  [ "$code" = "403" ] || { echo "sales hoan tien tra ve HTTP $code, mong 403"; return 1; }
+  ref="$(cat "$PAYREF_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'X-Fake-Signature: 0000000000000000000000000000000000000000000000000000000000000000' \
+    -d "{\"gateway_reference\":\"$ref\",\"status\":\"paid\",\"amount\":100000}" \
+    "http://127.0.0.1:$PORT_DEMO/api/payments/webhook")"
+  [ "$code" = "401" ] || { echo "webhook sai chu ky tra ve HTTP $code, mong 401"; return 1; }
+}
+demo_step "thanh toan: warehouse tao payment bi 403, sales hoan tien bi 403, webhook sai chu ky bi 401" thanh_toan_rbac
 
 idempotency_demo() {
   local first second

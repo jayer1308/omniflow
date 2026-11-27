@@ -46,6 +46,7 @@ ngay, vì không xem lại được. Biến môi trường khác:
 | --- | --- | --- |
 | `OMNIFLOW_DB` | `data/omniflow.db` | Đường dẫn file SQLite |
 | `PORT` | `3000` | Port server lắng nghe |
+| `OMNIFLOW_WEBHOOK_SECRET` | (không có) | Secret giả lập ký webhook thanh toán (`X-Fake-Signature`); thiếu thì endpoint webhook trả 503, server vẫn chạy các route khác (D22) |
 
 ## Phân quyền (RBAC, GOAL-002)
 
@@ -99,6 +100,34 @@ Idempotency: header `Idempotency-Key` hoặc `idempotency_key` trong body,
 tên miền `order:create:<key>` / `order:<hành động>:<key>`, gửi lại trả
 `replayed: true`.
 
+## Thanh toán + hoàn tiền (GOAL-006)
+
+Thanh toán là dữ liệu cấp org, gắn với đơn; `branch_id` của payment lấy
+theo chi nhánh của đơn. Thu tiền mặt/chuyển khoản → `paid` ngay trong
+cùng transaction (đơn `draft` vẫn thu được, đơn `cancelled` → 400); thu
+qua cổng fake → `requested` + `gateway_reference` duy nhất theo giao dịch
+(`FakePaymentAdapter.charge` với mã `${orderCode}:${paymentId}`), webhook
+giả lập `POST /api/payments/webhook` chốt `paid`/`failed` đúng một lần
+(xác thực bằng header `X-Fake-Signature` = sha256 hex của
+`` `${gateway_reference}:${status}:${amount}:${secret}` ``, secret qua
+biến môi trường `OMNIFLOW_WEBHOOK_SECRET`; sai/thiếu chữ ký → 401, thiếu
+secret → 503, reference không tồn tại → 404, amount khác → 400; `paid`
+lần 2 → 200 kèm `duplicate: true`; `failed` sau `paid` bị bỏ qua).
+Hoàn tiền (`POST /api/payments/:id/refunds`, `{amount, reason}`) là bản
+ghi riêng, `completed` ngay qua adapter fake; tổng hoàn không bao giờ
+vượt số đã trả (kiểm tra trong `BEGIN IMMEDIATE`); hoàn đủ → payment
+`refunded`, hoàn một phần → `partially_refunded`; hoàn tiền không đổi
+trạng thái đơn. Đối soát (`GET /api/orders/:id/payments`,
+`GET /api/payments/:id`) tính ở service: `order_total`/`paid_total`/
+`refunded_total`/`outstanding`/`payment_status`
+(`unpaid`/`partially_paid`/`paid`/`overpaid`/`refunded`); payments mới
+nhất trước, `events` cũ nhất trước. Idempotency: header
+`Idempotency-Key` hoặc `idempotency_key` trong body, tên miền
+`payment:create:<key>` / `payment:refund:<key>`, gửi lại trả
+`replayed: true`. Ma trận quyền thanh toán đầy đủ: `docs/RBAC.md`;
+quyết định mô hình: `docs/DECISIONS.md` (D22, D23). KHÔNG lưu thông tin
+thẻ; không có DELETE payment, không có API sửa/xóa lịch sử giao dịch.
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
@@ -145,7 +174,7 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (10 migration, 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng)
+- `src/db.ts` — mở DB + migration tuần tự (11 migration, 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng, 011 là thanh toán/hoàn tiền/lịch sử giao dịch)
 - `src/orders.ts` — đơn hàng: state machine, mã đơn, service tạo/chuyển
   trạng thái (giữ/giải phóng/xuất kho qua `applyMovement`, idempotency
   trong transaction)

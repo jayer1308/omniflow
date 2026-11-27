@@ -364,3 +364,128 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   bản `.apos` mới nhất (file `.apos` cũ trong cây commit sẽ bị chặn bởi
   guard protected-file).
 - Đổi khi: không áp dụng — goal bookkeeping đã đóng khi inbox sạch.
+
+## D22 — Mô hình payment/refund: trạng thái, hoàn tiền riêng bảng, webhook chống trùng bằng reference UNIQUE, idempotency trong transaction, đối soát tính ở service (27/11/2026)
+
+- Quyết định (GOAL-006): thanh toán là dữ liệu cấp org, gắn với đơn —
+  bảng `payments` (`org_id`/`branch_id` NOT NULL — chi nhánh thu tiền lấy
+  theo chi nhánh của đơn, không lấy từ body; `order_id` FK tới `orders`;
+  `method` `cash`/`bank_transfer`/`gateway`; `amount` nguyên đồng > 0;
+  `currency` `VND`; `status` `requested`/`paid`/`failed`/`refunded`/
+  `partially_refunded`; `gateway_reference` TEXT UNIQUE khi có giá trị;
+  `received_by` FK tới `users`; `received_at`/`created_at`/`updated_at`).
+  Không có endpoint DELETE payment (chỉ hoàn tiền bằng bản ghi refund,
+  giữ lịch sử).
+- Hoàn tiền là bản ghi riêng (`refunds`: `payment_id` FK, `amount` > 0,
+  `reason` bắt buộc, `status` `requested`/`completed`/`failed`,
+  `created_by`), không sửa payment gốc; adapter fake hoàn luôn thành
+  công nên `requested` chuyển ngay sang `completed` trong cùng
+  transaction. Tổng hoàn không bao giờ vượt số đã trả: DB CHECK tổng
+  tích lũy không làm được bằng CHECK đơn giản nên bắt buộc kiểm tra
+  (tổng hoàn hiện tại + amount mới) trong cùng `BEGIN IMMEDIATE` rồi mới
+  insert. Hoàn đủ → payment `refunded`, hoàn một phần →
+  `partially_refunded`. Hoàn tiền KHÔNG đổi trạng thái đơn GOAL-005
+  (trả hàng/nhập lại kho là GOAL-007).
+- Lịch sử giao dịch append-only (`payment_events`: `payment_id` FK,
+  `event_type` `created`/`paid`/`failed`/`refund_completed`/
+  `webhook_duplicate_ignored`/`webhook_ignored`, `actor_id` NULL khi là
+  webhook, `detail` JSON; chỉ INSERT, không có API UPDATE/DELETE).
+  Payments trả mới nhất trước; events trả cũ nhất trước (như
+  `order_events` ở D19).
+- Thu tiền mặt/chuyển khoản = ghi nhận trực tiếp, `paid` ngay trong cùng
+  transaction, 1 event `paid` + 1 audit log; đơn `draft` vẫn thu được
+  (đặt cọc trước khi xác nhận); đơn `cancelled` → 400; trả thừa (tổng
+  paid > tổng đơn) được phép ghi nhận nhưng hiện rõ là thừa trong đối
+  soát (`outstanding` âm, `payment_status` `overpaid`) — không tự động
+  chặn, không giấu số thừa.
+- Thu qua cổng = yêu cầu (`requested` + `gateway_reference` từ adapter
+  đã sửa, D23) rồi webhook chốt, đúng một lần. Webhook giả lập `POST
+  /api/payments/webhook` KHÔNG yêu cầu session đăng nhập nhưng phải kiểm
+  tra chữ ký giả lập: header `X-Fake-Signature` = sha256 hex của
+  `` `${gateway_reference}:${status}:${amount}:${secret}` `` (secret qua
+  biến môi trường `OMNIFLOW_WEBHOOK_SECRET`, không commit secret thật);
+  sai/thiếu chữ ký → 401; thiếu secret ở môi trường thì endpoint webhook
+  trả 503 (không bao giờ chấp nhận webhook không chữ ký), server vẫn chạy
+  các route khác. Reference không tồn tại → 404; `amount` webhook khác
+  `amount` payment → 400. `paid` lần 2 → 200 kèm `duplicate: true`, ghi
+  event `webhook_duplicate_ignored`, không đổi gì; `failed` sau `paid` →
+  200, bỏ qua, ghi event `webhook_ignored`, KHÔNG đổi `paid` thành
+  `failed` (tiền đã về thì failed muộn không có hiệu lực); `failed`
+  trước rồi `paid` sau → `paid` vẫn chốt bình thường. Mọi webhook đều
+  ghi event (kể cả bản trùng) để đối soát thấy được. Chống ghi nhận 2
+  lần bằng `UNIQUE(gateway_reference)` + kiểm tra trạng thái trong cùng
+  transaction `BEGIN IMMEDIATE`.
+- Idempotency cho tạo payment + hoàn tiền qua `withStockIdempotency`
+  (GOAL-004) — kiểm tra key + thực thi + ghi key trong CÙNG MỘT
+  transaction `BEGIN IMMEDIATE`; tên miền `payment:create:<key>` /
+  `payment:refund:<key>`; gửi lại cùng key + cùng loại + cùng org → trả
+  đúng response đã lưu kèm `replayed: true`, không tạo mới. KHÔNG dùng
+  `withIdempotency` của GOAL-001 (kiểm tra ngoài transaction, có khe
+  race — bài học GOAL-004/005). Webhook KHÔNG dùng idempotency key của
+  client — chống trùng bằng `gateway_reference` UNIQUE. Thiếu key thì
+  vẫn thực thi (không bắt buộc) nhưng không có bảo vệ gửi lại.
+- Đối soát đơn–thanh toán tính ở service từ bảng payments/refunds, không
+  lưu cột tổng riêng (tránh lệch): `order_total` (tổng đơn GOAL-005),
+  `paid_total` (tổng payment `paid`/`partially_refunded`/`refunded` trừ
+  tổng refund `completed`), `refunded_total`, `outstanding`
+  (`order_total - paid_total`, âm nghĩa là thừa), `payment_status`
+  (`unpaid`/`partially_paid`/`paid`/`overpaid`/`refunded` — `refunded`
+  khi `paid_total` về 0 sau khi đã từng trả). Đơn `cancelled` vẫn xem
+  được lịch sử thanh toán/hoàn của nó.
+- RBAC thanh toán: `can()` mở rộng 3 actions (`create-payment`,
+  `refund-payment`, `view-payments`) theo ma trận `docs/RBAC.md` — ghi
+  nhận thu tiền: owner/manager/accountant toàn org, sales chỉ đơn thuộc
+  chi nhánh mình, warehouse 403; hoàn tiền: owner/manager/accountant,
+  sales/warehouse 403; xem: owner/manager/accountant toàn org, sales chỉ
+  chi nhánh mình, warehouse chỉ đơn có `warehouse_id` trong phạm vi.
+  Webhook là ngoại lệ duy nhất, xác thực bằng chữ ký.
+- Audit log: mọi thao tác tạo payment, webhook chốt/thất bại, hoàn tiền
+  đều ghi `audit_log` (`action` `create-payment`/`webhook-paid`/
+  `webhook-failed`/`refund-payment`, `detail` JSON `target_payment_id`/
+  `order_id`/`order_code`/`method`/`amount`/`gateway_reference`, KHÔNG
+  chứa dữ liệu nhạy cảm, KHÔNG chứa thông tin thẻ); webhook có `user_id`
+  NULL + `detail` ghi rõ `webhook` (`source: 'webhook'`).
+  `payment_events` là lịch sử giao dịch chi tiết; `audit_log` là lớp ghi
+  nhận thao tác nhạy cảm theo chuẩn GOAL-002 — cả hai đều phải có, không
+  thay nhau.
+- KHÔNG lưu thông tin thẻ: không có field nào chứa số thẻ/CVV trong DB,
+  API hay log (test quét chứng minh).
+- Bảo vệ race chỉ có ý nghĩa trong một process (D1): app một tiến trình,
+  bảo vệ race chỉ có ý nghĩa trong một process; đa process ngoài phạm
+  vi. Test đồng thời chứng minh bất biến (tổng đã trả chỉ tính 1 lần,
+  tổng hoàn không vượt số đã trả), không chứng minh được đa process.
+- Lý do: webhook gửi lặp/trễ/sai thứ tự là hành vi bình thường của cổng
+  thật — chỉ chống bằng `UNIQUE(gateway_reference)` + kiểm tra trạng
+  thái trong cùng transaction thì mới không tính tiền 2 lần; tổng hoàn
+  tích lũy không CHECK được bằng DB CHECK nên phải kiểm tra trong
+  transaction; đối soát tính ở service thì không bao giờ lệch với dữ
+  liệu gốc.
+- Đổi khi: cổng thanh toán thật (goal riêng, ngoài phạm vi vĩnh viễn của
+  dự án giả lập), đa process thật (thay store), hoặc cho phép lưu phương
+  thức thanh toán của khách (GOAL-008, vẫn không lưu thông tin thẻ).
+
+## D23 — Sửa FakePaymentAdapter: reference duy nhất theo giao dịch + cơ chế giả lập lỗi chỉ dùng trong test (27/11/2026)
+
+- Quyết định (GOAL-006): `FakePaymentAdapter.charge(amount, currency,
+  transactionId?)` — có `transactionId` thì digest theo
+  `${amount}:${currency}:${transactionId}`, không có thì giữ digest cũ
+  `${amount}:${currency}` (bắt buộc: test khóa GOAL-001 gọi
+  `charge(50000,'VND')` 2 lần vẫn bằng nhau). Route tạo payment gateway
+  gọi charge với mã giao dịch `${orderCode}:${paymentId}` (tạo payment
+  trước rồi mới gọi charge để có payment id) nên 2 lần thu cùng số tiền
+  cho 2 đơn khác nhau không còn trùng `gateway_reference` — sửa đúng
+  điểm rủi ro lớn nhất của brief (digest cũ theo số tiền sẽ làm
+  `UNIQUE(gateway_reference)` chặn nhầm lần thu thứ hai). Vẫn
+  deterministic (cùng input → cùng output), vẫn `simulated: true`.
+- Thêm `refund(paymentReference, amount)` vào adapter, trả
+  `FAKE-REF-<hash12>` deterministic theo `${paymentReference}:${amount}`
+  (cùng giao dịch + cùng số tiền → cùng reference hoàn).
+- Thêm `failNext()` static, một lần: lần `charge()` kế tiếp trả
+  `status: 'failed'`, sau đó tự tắt và charge lại `success`. CHỈ dùng
+  trong test — route production không bao giờ gọi `failNext()`; ghi rõ
+  trong code để không lọt ra production path.
+- Lý do: reference phải duy nhất theo giao dịch chứ không theo số tiền,
+  nếu không `UNIQUE(gateway_reference)` vừa là lá chắn chống trùng
+  webhook vừa thành rào cản chặn nhầm lần thu hợp lệ thứ hai.
+- Đổi khi: cổng thanh toán thật (ngoài phạm vi vĩnh viễn), hoặc cần giả
+  lập thêm loại lỗi (thêm cờ tương tự, vẫn chỉ dùng trong test).

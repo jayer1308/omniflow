@@ -2,14 +2,15 @@ import { createHash } from 'node:crypto';
 
 export interface PaymentResult {
   simulated: true;
-  status: 'success';
+  status: 'success' | 'failed';
   reference: string;
   amount: number;
   currency: string;
 }
 
 export interface PaymentAdapter {
-  charge(amount: number, currency: string): PaymentResult;
+  charge(amount: number, currency: string, transactionId?: string): PaymentResult;
+  refund(paymentReference: string, amount: number): PaymentResult;
 }
 
 export interface ShippingQuote {
@@ -44,13 +45,46 @@ function digest(prefix: string, input: string): string {
 }
 
 export class FakePaymentAdapter implements PaymentAdapter {
-  charge(amount: number, currency: string): PaymentResult {
+  /**
+   * Cờ giả lập lỗi có chủ đích, CHỈ dùng trong test (D23): lần charge() kế
+   * tiếp trả status 'failed', sau đó tự tắt và charge lại 'success'.
+   * Không lọt ra production path (route không bao giờ gọi failNext()).
+   */
+  private static failNextFlag = false;
+
+  static failNext(): void {
+    FakePaymentAdapter.failNextFlag = true;
+  }
+
+  charge(amount: number, currency: string, transactionId?: string): PaymentResult {
+    const status: 'success' | 'failed' = FakePaymentAdapter.failNextFlag
+      ? 'failed'
+      : 'success';
+    FakePaymentAdapter.failNextFlag = false;
+    // Reference duy nhất theo giao dịch (D23): có transactionId thì digest
+    // theo `${amount}:${currency}:${transactionId}`; không có thì giữ
+    // digest cũ `${amount}:${currency}` để test khóa GOAL-001
+    // (charge(50000,'VND') 2 lần vẫn bằng nhau) không vỡ.
+    const input =
+      transactionId !== undefined && transactionId !== ''
+        ? `${amount}:${currency}:${transactionId}`
+        : `${amount}:${currency}`;
+    return {
+      simulated: true,
+      status,
+      reference: digest('FAKE-PAY', input),
+      amount,
+      currency,
+    };
+  }
+
+  refund(paymentReference: string, amount: number): PaymentResult {
     return {
       simulated: true,
       status: 'success',
-      reference: digest('FAKE-PAY', `${amount}:${currency}`),
+      reference: digest('FAKE-REF', `${paymentReference}:${amount}`),
       amount,
-      currency,
+      currency: 'VND',
     };
   }
 }
