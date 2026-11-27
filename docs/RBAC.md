@@ -178,6 +178,43 @@ Lưu ý:
   `replayed: true`. Thiếu key vẫn thực thi (không bắt buộc) nhưng không
   có bảo vệ gửi lại.
 
+### Ma trận thanh toán (GOAL-006)
+
+Payment là dữ liệu cấp org, gắn với đơn; `branch_id` của payment lấy theo
+chi nhánh của đơn (không lấy từ body). Phạm vi gate bằng `branchId` +
+`warehouseId` của đơn (kiểu `Target` đã có).
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Ghi nhận thu tiền (`POST /api/orders/:id/payments`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh của mình | Không (403) | Được, toàn org |
+| Hoàn tiền (`POST /api/payments/:id/refunds`) | Được, toàn org | Được, toàn org | Không (403) | Không (403) | Được, toàn org |
+| Xem thanh toán/đối soát (`GET /api/orders/:id/payments`, `GET /api/payments/:id`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh của mình | Được, chỉ xem đơn có `warehouse_id` trong phạm vi của mình | Được, toàn org |
+
+Ghi chú: `sales` xem payment của đơn ngoài chi nhánh của mình → 403;
+`warehouse` không được tạo payment hay hoàn tiền dù đúng kho → 403; mọi
+vai xem payment ngoài org → 403. Webhook không qua ma trận này (xác thực
+bằng chữ ký giả lập `X-Fake-Signature`, xem D22).
+
+### Endpoints mới (GOAL-006)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/orders/:id/payments` | owner / manager / sales (đơn thuộc chi nhánh mình) / accountant; warehouse → 403 |
+| `POST /api/payments/:id/refunds` | owner / manager / accountant; sales / warehouse → 403 |
+| `GET /api/orders/:id/payments`, `GET /api/payments/:id` | mọi vai, lọc theo phạm vi (sales: chi nhánh mình; warehouse: kho được gán; accountant: toàn org, chỉ xem) |
+| `POST /api/payments/webhook` | không qua session — xác thực bằng chữ ký `X-Fake-Signature` (sai/thiếu → 401; thiếu secret môi trường → 503) |
+
+Audit log: mọi thao tác tạo payment, webhook chốt/thất bại, hoàn tiền đều
+ghi `audit_log` (`action` `create-payment`/`webhook-paid`/`webhook-failed`/
+`refund-payment`, `detail` JSON với `target_payment_id`, `order_id`,
+`order_code`, `method`, `amount`, `gateway_reference`, KHÔNG chứa thông
+tin thẻ); webhook có `user_id` NULL + `detail` ghi rõ `webhook`. Xem log
+theo luật GOAL-002 (`GET /api/audit-log`: `owner` toàn org, `manager`
+trong phạm vi, các vai khác → 403). `payment_events` là lịch sử giao dịch
+chi tiết (append-only, cũ nhất trước), `audit_log` là lớp ghi nhận thao
+tác nhạy cảm — cả hai đều phải có, không thay nhau. Không có endpoint
+DELETE payment, không có API sửa/xóa lịch sử giao dịch.
+
 ### Endpoints mới (GOAL-005)
 
 | Endpoint | Vai trò |

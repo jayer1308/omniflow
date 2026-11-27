@@ -77,7 +77,13 @@ export type Action =
   | 'process-order'
   | 'complete-order'
   | 'cancel-order'
-  | 'view-orders';
+  | 'view-orders'
+  // GOAL-006: thanh toán / hoàn tiền (xem docs/RBAC.md, ma trận thanh
+  // toán). Payment theo chi nhánh của đơn (branchId) + kho của đơn
+  // (warehouseId) để gate phạm vi sales/warehouse.
+  | 'create-payment'
+  | 'refund-payment'
+  | 'view-payments';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -221,6 +227,31 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
     }
     case 'view-orders': {
+      if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
+        return true;
+      }
+      if (actor.role === 'sales') return inScope(actor.branchId, targetBranch);
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return false;
+    }
+    // GOAL-006: ma trận thanh toán (docs/RBAC.md). Ghi nhận thu tiền:
+    // owner/manager/accountant toàn org, sales chỉ đơn thuộc chi nhánh
+    // mình, warehouse không được. Hoàn tiền: owner/manager/accountant,
+    // sales/warehouse không được. Xem: owner/manager/accountant toàn org,
+    // sales chỉ chi nhánh mình, warehouse chỉ đơn có kho trong phạm vi.
+    case 'create-payment': {
+      if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
+        return true;
+      }
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'refund-payment': {
+      return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant';
+    }
+    case 'view-payments': {
       if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
         return true;
       }

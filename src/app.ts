@@ -13,6 +13,18 @@ import {
 } from './auth.js';
 import type { SessionUser } from './auth.js';
 import { withIdempotency } from './idempotency.js';
+import { FakePaymentAdapter } from './adapters/index.js';
+import {
+  completedRefundTotal,
+  computePaymentSummary,
+  insertPaymentEvent,
+  listOrderPayments,
+  paymentDetail,
+  signWebhook,
+  type OrderPaymentSummary,
+  type PaymentDetail,
+  type PaymentRow,
+} from './payments.js';
 import {
   createOrderTx,
   getOrderDetail,
@@ -92,7 +104,18 @@ function countActiveOwners(db: DatabaseSync, orgId: number): number {
 function writeAudit(
   db: DatabaseSync,
   orgId: number,
-  actorId: number,
+  actorId: number | null,
+  action: string,
+  detail: Record<string, unknown>,
+): void {
+  insertAudit(db, orgId, actorId, action, detail);
+}
+
+/** Ghi audit_log (user_id NULL khi là webhook, ghi rõ 'webhook' trong detail). */
+function insertAudit(
+  db: DatabaseSync,
+  orgId: number,
+  actorId: number | null,
   action: string,
   detail: Record<string, unknown>,
 ): void {
@@ -142,6 +165,356 @@ function visibleAuditRows(db: DatabaseSync, actor: SessionUser): AuditRow[] {
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// ---------- Thanh toan + hoan tien (GOAL-006, D22/D23) ----------
+// Service chay trong transaction BEGIN IMMEDIATE (route boc bang
+// runStockOp/withStockIdempotency khi co key, runStockTransaction khi
+// khong). Loi nghiep vu nem ra la Error co ma o dau message, route map
+// sang HTTP: 'bad_request' -> 400, 'not_found' -> 404, 'forbidden' -> 403.
+
+interface PaymentOrderRow {
+  id: number;
+  org_id: number;
+  branch_id: number;
+  warehouse_id: number;
+  code: string;
+  status: string;
+  total: number;
+}
+
+function payBad(message: string): Error {
+  return new Error(`bad_request: ${message}`);
+}
+
+function payNotFound(message: string): Error {
+  return new Error(`not_found: ${message}`);
+}
+
+function payForbidden(message: string): Error {
+  return new Error(`forbidden: ${message}`);
+}
+
+function loadPaymentOrder(db: DatabaseSync, orderId: number): PaymentOrderRow | undefined {
+  return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId) as
+    | PaymentOrderRow
+    | undefined;
+}
+
+function loadPaymentRow(db: DatabaseSync, paymentId: number): PaymentRow | undefined {
+  return db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as
+    | PaymentRow
+    | undefined;
+}
+
+function paymentFail(res: Response, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith('not_found')) {
+    res.status(404).json({ error: msg });
+    return;
+  }
+  if (msg.startsWith('forbidden')) {
+    res.status(403).json({ error: msg });
+    return;
+  }
+  if (msg.startsWith('bad_request')) {
+    res.status(400).json({ error: msg });
+    return;
+  }
+  res.status(500).json({ error: 'Lỗi hệ thống khi xử lý thanh toán' });
+}
+
+/**
+ * Tao payment trong transaction. Cash/bank_transfer -> 'paid' ngay + 1
+ * event 'paid'; gateway -> insert lay id roi goi adapter voi ma giao dich
+ * `${orderCode}:${paymentId}` (reference duy nhat theo giao dich, D23),
+ * status 'requested' + 1 event 'created'. branch_id lay theo don.
+ */
+function createPaymentTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  orderId: number,
+  body: { method?: unknown; amount?: unknown },
+): { payment: PaymentDetail; order_summary: OrderPaymentSummary } {
+  const order = loadPaymentOrder(db, orderId);
+  if (!order) throw payNotFound('không tìm thấy đơn hàng');
+  if (order.org_id !== actor.orgId) throw payForbidden('đơn không thuộc doanh nghiệp của bạn');
+  if (
+    !can(actor, 'create-payment', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép ghi nhận thu tiền cho đơn này');
+  }
+  const method = body.method;
+  if (method !== 'cash' && method !== 'bank_transfer' && method !== 'gateway') {
+    throw payBad('method phải thuộc cash/bank_transfer/gateway');
+  }
+  const amount = body.amount;
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) {
+    throw payBad('amount phải là số nguyên đồng > 0');
+  }
+  if (order.status === 'cancelled') throw payBad('đơn đã hủy, không thu tiền được');
+  const now = new Date().toISOString();
+  const isDirect = method === 'cash' || method === 'bank_transfer';
+  const paymentId = Number(
+    db
+      .prepare(
+        `INSERT INTO payments (org_id, branch_id, order_id, method, amount, currency,
+          status, gateway_reference, received_by, received_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'VND', ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        actor.orgId,
+        order.branch_id,
+        orderId,
+        method,
+        amount,
+        isDirect ? 'paid' : 'requested',
+        actor.id,
+        isDirect ? now : null,
+        now,
+        now,
+      ).lastInsertRowid,
+  );
+  let gatewayReference: string | null = null;
+  if (method === 'gateway') {
+    const result = new FakePaymentAdapter().charge(amount, 'VND', `${order.code}:${paymentId}`);
+    gatewayReference = result.reference;
+    const status = result.status === 'success' ? 'requested' : 'failed';
+    db.prepare('UPDATE payments SET gateway_reference = ?, status = ?, updated_at = ? WHERE id = ?')
+      .run(gatewayReference, status, now, paymentId);
+    insertPaymentEvent(db, paymentId, 'created', actor.id, {
+      method,
+      amount,
+      currency: 'VND',
+      gateway_reference: gatewayReference,
+    });
+    if (status === 'failed') {
+      insertPaymentEvent(db, paymentId, 'failed', actor.id, {
+        method,
+        amount,
+        currency: 'VND',
+        gateway_reference: gatewayReference,
+      });
+    }
+  } else {
+    insertPaymentEvent(db, paymentId, 'paid', actor.id, {
+      method,
+      amount,
+      currency: 'VND',
+    });
+  }
+  insertAudit(db, actor.orgId, actor.id, 'create-payment', {
+    target_payment_id: paymentId,
+    order_id: order.id,
+    order_code: order.code,
+    method,
+    amount,
+    gateway_reference: gatewayReference,
+  });
+  return {
+    payment: paymentDetail(db, paymentId) as PaymentDetail,
+    order_summary: computePaymentSummary(db, orderId),
+  };
+}
+
+/**
+ * Xu ly 1 webhook trong transaction BEGIN IMMEDIATE. Tien da ve thi
+ * failed muon vo hieu (event webhook_ignored); paid lap -> duplicate
+ * (event webhook_duplicate_ignored); failed truoc roi paid sau van chot.
+ */
+function processWebhookTx(
+  db: DatabaseSync,
+  gatewayReference: string,
+  status: 'paid' | 'failed',
+  amount: number,
+): { payment: PaymentDetail; order_summary: OrderPaymentSummary; duplicate: boolean } {
+  const payment = db
+    .prepare('SELECT * FROM payments WHERE gateway_reference = ?')
+    .get(gatewayReference) as PaymentRow | undefined;
+  if (!payment) throw payNotFound('không tìm thấy payment theo gateway_reference');
+  if (payment.amount !== amount) throw payBad('amount webhook khác amount payment');
+  const order = loadPaymentOrder(db, payment.order_id) as PaymentOrderRow;
+  const alreadyPaid =
+    payment.status === 'paid' ||
+    payment.status === 'partially_refunded' ||
+    payment.status === 'refunded';
+  const now = new Date().toISOString();
+  const auditDetail = {
+    target_payment_id: payment.id,
+    order_id: order.id,
+    order_code: order.code,
+    method: payment.method,
+    amount,
+    gateway_reference: gatewayReference,
+    source: 'webhook',
+  };
+  if (status === 'paid') {
+    if (alreadyPaid) {
+      insertPaymentEvent(db, payment.id, 'webhook_duplicate_ignored', null, {
+        gateway_reference: gatewayReference,
+        status,
+        amount,
+        source: 'webhook',
+      });
+      return {
+        payment: paymentDetail(db, payment.id) as PaymentDetail,
+        order_summary: computePaymentSummary(db, order.id),
+        duplicate: true,
+      };
+    }
+    db.prepare("UPDATE payments SET status = 'paid', received_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, payment.id);
+    insertPaymentEvent(db, payment.id, 'paid', null, {
+      gateway_reference: gatewayReference,
+      status,
+      amount,
+      source: 'webhook',
+    });
+    insertAudit(db, payment.org_id, null, 'webhook-paid', auditDetail);
+    return {
+      payment: paymentDetail(db, payment.id) as PaymentDetail,
+      order_summary: computePaymentSummary(db, order.id),
+      duplicate: false,
+    };
+  }
+  // status === 'failed'
+  if (alreadyPaid) {
+    insertPaymentEvent(db, payment.id, 'webhook_ignored', null, {
+      gateway_reference: gatewayReference,
+      status,
+      amount,
+      source: 'webhook',
+    });
+    return {
+      payment: paymentDetail(db, payment.id) as PaymentDetail,
+      order_summary: computePaymentSummary(db, order.id),
+      duplicate: false,
+    };
+  }
+  if (payment.status === 'failed') {
+    insertPaymentEvent(db, payment.id, 'webhook_duplicate_ignored', null, {
+      gateway_reference: gatewayReference,
+      status,
+      amount,
+      source: 'webhook',
+    });
+    return {
+      payment: paymentDetail(db, payment.id) as PaymentDetail,
+      order_summary: computePaymentSummary(db, order.id),
+      duplicate: true,
+    };
+  }
+  db.prepare("UPDATE payments SET status = 'failed', updated_at = ? WHERE id = ?").run(
+    now,
+    payment.id,
+  );
+  insertPaymentEvent(db, payment.id, 'failed', null, {
+    gateway_reference: gatewayReference,
+    status,
+    amount,
+    source: 'webhook',
+  });
+  insertAudit(db, payment.org_id, null, 'webhook-failed', auditDetail);
+  return {
+    payment: paymentDetail(db, payment.id) as PaymentDetail,
+    order_summary: computePaymentSummary(db, order.id),
+    duplicate: false,
+  };
+}
+
+/**
+ * Hoan tien trong transaction BEGIN IMMEDIATE: tong hoan tich luy +
+ * amount moi khong bao gio vuot so da tra (kiem tra trong transaction,
+ * DB CHECK don khong lam duoc). Refund 'completed' ngay qua adapter fake;
+ * payment doi 'refunded' (hoan du) hoac 'partially_refunded' (hoan mot
+ * phan). Hoan tien KHONG doi trang thai don GOAL-005.
+ */
+function createRefundTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  paymentId: number,
+  body: { amount?: unknown; reason?: unknown },
+): {
+  refund: Record<string, unknown>;
+  payment: PaymentDetail;
+  order_summary: OrderPaymentSummary;
+} {
+  const payment = loadPaymentRow(db, paymentId);
+  if (!payment) throw payNotFound('không tìm thấy payment');
+  if (payment.org_id !== actor.orgId) throw payForbidden('payment không thuộc doanh nghiệp của bạn');
+  const order = loadPaymentOrder(db, payment.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'refund-payment', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép hoàn tiền payment này');
+  }
+  const reason = body.reason;
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw payBad('reason hoàn tiền bắt buộc');
+  }
+  const amount = body.amount;
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) {
+    throw payBad('amount phải là số nguyên đồng > 0');
+  }
+  if (payment.status !== 'paid' && payment.status !== 'partially_refunded') {
+    throw payBad('chỉ hoàn tiền payment đã trả');
+  }
+  const refundedSoFar = completedRefundTotal(db, payment.id);
+  if (refundedSoFar + amount > payment.amount) {
+    throw payBad('tổng hoàn vượt số đã trả');
+  }
+  const adapterResult = new FakePaymentAdapter().refund(
+    payment.gateway_reference ?? `PAY-${payment.id}`,
+    amount,
+  );
+  const now = new Date().toISOString();
+  const refundId = Number(
+    db
+      .prepare(
+        `INSERT INTO refunds (payment_id, amount, reason, status, created_by, created_at)
+         VALUES (?, ?, ?, 'completed', ?, ?)`,
+      )
+      .run(payment.id, amount, reason.trim(), actor.id, now).lastInsertRowid,
+  );
+  const newTotal = refundedSoFar + amount;
+  const newStatus = newTotal === payment.amount ? 'refunded' : 'partially_refunded';
+  db.prepare('UPDATE payments SET status = ?, updated_at = ? WHERE id = ?').run(
+    newStatus,
+    now,
+    payment.id,
+  );
+  insertPaymentEvent(db, payment.id, 'refund_completed', actor.id, {
+    amount,
+    reason: reason.trim(),
+    refund_id: refundId,
+    refund_reference: adapterResult.reference,
+  });
+  insertAudit(db, actor.orgId, actor.id, 'refund-payment', {
+    target_payment_id: payment.id,
+    order_id: order.id,
+    order_code: order.code,
+    method: payment.method,
+    amount,
+    gateway_reference: payment.gateway_reference,
+    refund_id: refundId,
+  });
+  const refund = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId) as unknown as Record<
+    string,
+    unknown
+  >;
+  return {
+    refund,
+    payment: paymentDetail(db, payment.id) as PaymentDetail,
+    order_summary: computePaymentSummary(db, order.id),
+  };
+}
 
 export function createApp(db: DatabaseSync): Express {
   const app = express();
@@ -2993,23 +3366,166 @@ export function createApp(db: DatabaseSync): Express {
   app.post('/api/orders/:id/complete', requireAuth, orderTransition('complete'));
   app.post('/api/orders/:id/cancel', requireAuth, orderTransition('cancel'));
 
-  // ---------- Thanh toan + hoan tien (GOAL-006) — STUB cho Tester ----------
-  // Worker thay bang logic that: hien tai moi endpoint payment tra 501
-  // "not implemented" de test acceptance DO dung ly do. Route DELETE payment
-  // / sua-xoa lich su payment cung la stub 501 (khong phai 404) de test
-  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
-  // Webhook KHONG qua requireAuth (xac thuc bang chu ky gia lap, xem brief).
-  const paymentNotImplemented = (_req: TenantRequest, res: Response): void => {
-    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
-  };
-  app.post('/api/orders/:id/payments', paymentNotImplemented);
-  app.post('/api/payments/webhook', paymentNotImplemented);
-  app.post('/api/payments/:id/refunds', paymentNotImplemented);
-  app.get('/api/orders/:id/payments', paymentNotImplemented);
-  app.get('/api/payments/:id', paymentNotImplemented);
-  app.delete('/api/payments/:id', paymentNotImplemented);
-  app.patch('/api/payments/:id/events/:eventId', paymentNotImplemented);
-  app.delete('/api/payments/:id/events/:eventId', paymentNotImplemented);
+  // ---------- Thanh toan + hoan tien (GOAL-006, D22/D23) ----------
+  // Tao payment/hoan tien qua withStockIdempotency (ten mien
+  // payment:create:<key> / payment:refund:<key>): kiem tra key + thuc thi
+  // + ghi key trong CUNG MOT transaction BEGIN IMMEDIATE. Gui lai tra
+  // response cu kem replayed: true. Webhook KHONG qua requireAuth (xac
+  // thuc bang chu ky gia lap X-Fake-Signature, secret qua bien moi truong
+  // OMNIFLOW_WEBHOOK_SECRET; thieu secret -> 503, server van chay).
+  // Khong co endpoint DELETE payment hay sua/xoa payment_events
+  // (append-only): goi cac route do tra 404 mac dinh cua Express.
+
+  /** Key idempotency cho payment, tu header hoac body (thieu key van chay). */
+  function paymentKey(req: TenantRequest, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = (req.body ?? {}) as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `payment:${op}:${raw}`;
+  }
+
+  app.post('/api/orders/:id/payments', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = Number(req.params.id);
+    if (!Number.isInteger(orderId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    try {
+      const outcome = runStockOp(actor, paymentKey(req, 'create'), () =>
+        createPaymentTx(db, actor, orderId, (req.body ?? {}) as { method?: unknown; amount?: unknown }),
+      );
+      if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+      else res.status(201).json(outcome.result);
+    } catch (err) {
+      paymentFail(res, err);
+    }
+  });
+
+  app.post('/api/payments/webhook', (req: TenantRequest, res: Response) => {
+    const body = (req.body ?? {}) as {
+      gateway_reference?: unknown;
+      status?: unknown;
+      amount?: unknown;
+    };
+    const ref = body.gateway_reference;
+    const status = body.status;
+    const amount = body.amount;
+    if (
+      typeof ref !== 'string' ||
+      ref.length === 0 ||
+      (status !== 'paid' && status !== 'failed') ||
+      typeof amount !== 'number' ||
+      !Number.isInteger(amount) ||
+      amount <= 0
+    ) {
+      res.status(400).json({ error: 'webhook không hợp lệ' });
+      return;
+    }
+    const secret = process.env.OMNIFLOW_WEBHOOK_SECRET;
+    if (!secret) {
+      res.status(503).json({ error: 'chưa cấu hình secret webhook' });
+      return;
+    }
+    const signature = req.headers['x-fake-signature'];
+    if (typeof signature !== 'string' || signature !== signWebhook(secret, ref, status, amount)) {
+      res.status(401).json({ error: 'chữ ký webhook không hợp lệ' });
+      return;
+    }
+    try {
+      const result = runStockTransaction(db, () => processWebhookTx(db, ref, status, amount));
+      res.json(result);
+    } catch (err) {
+      paymentFail(res, err);
+    }
+  });
+
+  app.post('/api/payments/:id/refunds', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const paymentId = Number(req.params.id);
+    if (!Number.isInteger(paymentId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    try {
+      const outcome = runStockOp(actor, paymentKey(req, 'refund'), () =>
+        createRefundTx(db, actor, paymentId, (req.body ?? {}) as { amount?: unknown; reason?: unknown }),
+      );
+      if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+      else res.status(201).json(outcome.result);
+    } catch (err) {
+      paymentFail(res, err);
+    }
+  });
+
+  app.get('/api/orders/:id/payments', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = Number(req.params.id);
+    if (!Number.isInteger(orderId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const order = loadPaymentOrder(db, orderId);
+    if (!order) {
+      res.status(404).json({ error: 'không tìm thấy đơn hàng' });
+      return;
+    }
+    if (order.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'đơn không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    if (
+      !can(actor, 'view-payments', {
+        orgId: actor.orgId,
+        branchId: order.branch_id,
+        warehouseId: order.warehouse_id,
+      })
+    ) {
+      res.status(403).json({ error: 'bạn không được phép xem thanh toán của đơn này' });
+      return;
+    }
+    res.json({
+      payments: listOrderPayments(db, orderId),
+      order_summary: computePaymentSummary(db, orderId),
+    });
+  });
+
+  app.get('/api/payments/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const paymentId = Number(req.params.id);
+    if (!Number.isInteger(paymentId)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const payment = loadPaymentRow(db, paymentId);
+    if (!payment) {
+      res.status(404).json({ error: 'không tìm thấy payment' });
+      return;
+    }
+    if (payment.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'payment không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    const order = loadPaymentOrder(db, payment.order_id) as PaymentOrderRow;
+    if (
+      !can(actor, 'view-payments', {
+        orgId: actor.orgId,
+        branchId: order.branch_id,
+        warehouseId: order.warehouse_id,
+      })
+    ) {
+      res.status(403).json({ error: 'bạn không được phép xem payment này' });
+      return;
+    }
+    res.json({
+      payment: paymentDetail(db, paymentId) as PaymentDetail,
+      order_summary: computePaymentSummary(db, order.id),
+    });
+  });
 
   return app;
 }
