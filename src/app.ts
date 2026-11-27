@@ -33,6 +33,14 @@ import {
   type OrderAction,
 } from './orders.js';
 import {
+  computePointsReport,
+  computePromotionsReport,
+  computeReconciliationReport,
+  computeRevenueReport,
+  computeStockReport,
+  reportRange,
+} from './reports.js';
+import {
   applyPromotionTx,
   createPromotionTx,
   getPromotionDetail,
@@ -4886,27 +4894,483 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
-  // ---------- Bao cao + doi soat (GOAL-010) — STUB cua Tester ----------
-  // Worker implement 5 endpoint + src/reports.ts; stub tra 501 de test
-  // khoa do dung ly do (thieu tinh nang), khong phai loi setup.
-  function reportNotImplemented(res: Response): void {
-    res.status(501).json({ error: 'not implemented: bao cao chua co' });
+  // ---------- Bao cao + doi soat (GOAL-010, D28) ----------
+  // 5 endpoint GET /api/reports/revenue|stock|reconciliation|promotions|
+  // points, kem ?format=csv. Moi endpoint qua requireAuth + can()
+  // (view-reports / export-reports) + gate theo loai bao cao va org trien
+  // khai (xem reportHomeOrgId). Xem JSON khong ghi audit; chi xuat CSV
+  // moi ghi audit_log action 'export-report'. Loi nghiep vu nem ra la
+  // Error co ma o dau message, reportFail map sang HTTP nhu promoFail.
+  type ReportKind = 'revenue' | 'stock' | 'reconciliation' | 'promotions' | 'points';
+
+  function reportFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('conflict')) {
+      res.status(409).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý báo cáo' });
   }
 
-  app.get('/api/reports/revenue', requireAuth, (_req: TenantRequest, res: Response) => {
-    reportNotImplemented(res);
+  function repBad(message: string): Error {
+    return new Error(`bad_request: ${message}`);
+  }
+
+  function repNotFound(message: string): Error {
+    return new Error(`not_found: ${message}`);
+  }
+
+  function repForbidden(message: string): Error {
+    return new Error(`forbidden: ${message}`);
+  }
+
+  /**
+   * Org trien khai cua bao cao: he thong chay local cho mot doanh nghiep
+   * (seed tao dung 1 org; D9 local-only). Cac ham thuan bao cao tong hop
+   * du lieu cua org nay, nen user thuoc org khac (fixture org B trong
+   * test) doc bao cao mac dinh bi 403 — dung nhu ma tran R-8 ("user org
+   * A doc bao cao org B -> 403"). Org trien khai la org co id nho nhat
+   * (org seed tao dau tien).
+   */
+  function reportHomeOrgId(): number {
+    const row = db.prepare('SELECT MIN(id) AS id FROM orgs').get() as { id: number | null };
+    return row.id ?? -1;
+  }
+
+  /** Gate chung bao cao: org trien khai + loai bao cao theo vai + can(). */
+  function authorizeReport(
+    actor: SessionUser,
+    report: ReportKind,
+    isCsv: boolean,
+    target: { orgId: number; branchId?: number | null; warehouseId?: number | null },
+  ): void {
+    if (actor.orgId !== reportHomeOrgId()) {
+      throw repForbidden('báo cáo không thuộc doanh nghiệp của bạn');
+    }
+    if (actor.role === 'warehouse' && report !== 'stock') {
+      throw repForbidden('vai kho chỉ được xem báo cáo tồn kho');
+    }
+    if (actor.role === 'sales' && report === 'stock') {
+      throw repForbidden('vai sales không được xem báo cáo tồn kho');
+    }
+    if (
+      !can(actor, isCsv ? 'export-reports' : 'view-reports', {
+        orgId: target.orgId,
+        branchId: target.branchId ?? null,
+        warehouseId: target.warehouseId ?? null,
+      })
+    ) {
+      throw repForbidden('bạn không được phép xem báo cáo này');
+    }
+  }
+
+  /** from/to tu query: chuoi YYYY-MM-DD hoac mac dinh thang hien tai. */
+  function reportQueryRange(req: TenantRequest): { from: string; to: string } {
+    const q = req.query as Record<string, unknown>;
+    return reportRange(
+      typeof q.from === 'string' ? q.from : undefined,
+      typeof q.to === 'string' ? q.to : undefined,
+    );
+  }
+
+  /** format tu query: mac dinh JSON; chi nhan 'csv' / 'json', la -> 400. */
+  function reportQueryIsCsv(req: TenantRequest): boolean {
+    const q = req.query as Record<string, unknown>;
+    const format = typeof q.format === 'string' ? q.format : undefined;
+    if (format !== undefined && format !== 'csv' && format !== 'json') {
+      throw repBad('format chỉ nhận csv hoặc json');
+    }
+    return format === 'csv';
+  }
+
+  /** branch_id tu query: khong ton tai -> 404, ngoai org -> 403. */
+  function resolveReportBranch(actor: SessionUser, raw: unknown): number | undefined {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string') throw repBad('branch_id không hợp lệ');
+    const id = Number(raw);
+    if (!Number.isInteger(id)) throw repBad('branch_id không hợp lệ');
+    const row = db.prepare('SELECT org_id FROM branches WHERE id = ?').get(id) as
+      | { org_id: number }
+      | undefined;
+    if (!row) throw repNotFound('không tìm thấy chi nhánh');
+    if (row.org_id !== actor.orgId) throw repForbidden('chi nhánh không thuộc doanh nghiệp của bạn');
+    return id;
+  }
+
+  /** warehouse_id tu query: khong ton tai -> 404, ngoai org -> 403. */
+  function resolveReportWarehouse(actor: SessionUser, raw: unknown): number | undefined {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string') throw repBad('warehouse_id không hợp lệ');
+    const id = Number(raw);
+    if (!Number.isInteger(id)) throw repBad('warehouse_id không hợp lệ');
+    const row = db.prepare('SELECT org_id FROM warehouses WHERE id = ?').get(id) as
+      | { org_id: number }
+      | undefined;
+    if (!row) throw repNotFound('không tìm thấy kho');
+    if (row.org_id !== actor.orgId) throw repForbidden('kho không thuộc doanh nghiệp của bạn');
+    return id;
+  }
+
+  /** variant_id tu query: khong ton tai -> 404, ngoai org -> 403. */
+  function resolveReportVariant(actor: SessionUser, raw: unknown): number | undefined {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string') throw repBad('variant_id không hợp lệ');
+    const id = Number(raw);
+    if (!Number.isInteger(id)) throw repBad('variant_id không hợp lệ');
+    const row = db.prepare('SELECT org_id FROM product_variants WHERE id = ?').get(id) as
+      | { org_id: number }
+      | undefined;
+    if (!row) throw repNotFound('không tìm thấy biến thể');
+    if (row.org_id !== actor.orgId) throw repForbidden('biến thể không thuộc doanh nghiệp của bạn');
+    return id;
+  }
+
+  /** Gui CSV: BOM + header + dong du lieu (csv-stringify tu dong quote
+   * truong chua dau phay, nhu GOAL-003). */
+  function sendReportCsv(res: Response, csv: string): void {
+    res.type('text/csv; charset=utf-8').send(`\uFEFF${csv}`);
+  }
+
+  app.get('/api/reports/revenue', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const q = req.query as Record<string, unknown>;
+    try {
+      const isCsv = reportQueryIsCsv(req);
+      const range = reportQueryRange(req);
+      const channel = typeof q.channel === 'string' ? q.channel : undefined;
+      if (channel !== undefined && channel !== 'counter' && channel !== 'web' && channel !== 'api') {
+        throw repBad(`kênh không hợp lệ: ${channel}`);
+      }
+      const groupBy = typeof q.group_by === 'string' ? q.group_by : 'day';
+      if (!['day', 'month', 'channel', 'branch', 'product', 'category'].includes(groupBy)) {
+        throw repBad(`group_by không hợp lệ: ${groupBy}`);
+      }
+      const branchId = resolveReportBranch(actor, q.branch_id);
+      // Sales khong co branch_id thi mac dinh loc chi nhanh minh.
+      const effectiveBranch =
+        branchId ?? (actor.role === 'sales' ? (actor.branchId ?? undefined) : undefined);
+      authorizeReport(actor, 'revenue', isCsv, {
+        orgId: actor.orgId,
+        branchId: effectiveBranch ?? null,
+      });
+      const report = computeRevenueReport(db, {
+        from: range.from,
+        to: range.to,
+        channel,
+        branchId: effectiveBranch,
+        groupBy,
+      });
+      if (!isCsv) {
+        res.json(report);
+        return;
+      }
+      const detail: Record<string, unknown> = {
+        report: 'revenue',
+        from: range.from,
+        to: range.to,
+        format: 'csv',
+        group_by: groupBy,
+      };
+      if (channel !== undefined) detail.channel = channel;
+      if (effectiveBranch !== undefined) detail.branch_id = effectiveBranch;
+      writeAudit(db, actor.orgId, actor.id, 'export-report', detail);
+      const csv = stringify(
+        [
+          ...report.rows.map((r) => ({
+            key: r.key,
+            label: r.label,
+            gross_revenue: r.gross_revenue,
+            net_revenue: r.net_revenue,
+            order_count: r.order_count,
+            paid_total: r.paid_total,
+            refunded_total: r.refunded_total,
+            points_discount_total: r.points_discount_total,
+            promo_discount_total: r.promo_discount_total,
+          })),
+          {
+            key: 'TOTAL',
+            label: '',
+            gross_revenue: report.totals.gross_revenue,
+            net_revenue: report.totals.net_revenue,
+            order_count: report.totals.order_count,
+            paid_total: report.totals.paid_total,
+            refunded_total: report.totals.refunded_total,
+            points_discount_total: report.totals.points_discount_total,
+            promo_discount_total: report.totals.promo_discount_total,
+          },
+        ],
+        {
+          header: true,
+          columns: [
+            'key',
+            'label',
+            'gross_revenue',
+            'net_revenue',
+            'order_count',
+            'paid_total',
+            'refunded_total',
+            'points_discount_total',
+            'promo_discount_total',
+          ],
+        },
+      );
+      sendReportCsv(res, csv);
+    } catch (err) {
+      reportFail(res, err);
+    }
   });
-  app.get('/api/reports/stock', requireAuth, (_req: TenantRequest, res: Response) => {
-    reportNotImplemented(res);
+
+  app.get('/api/reports/stock', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const q = req.query as Record<string, unknown>;
+    try {
+      const isCsv = reportQueryIsCsv(req);
+      const range = reportQueryRange(req);
+      const warehouseId = resolveReportWarehouse(actor, q.warehouse_id);
+      const variantId = resolveReportVariant(actor, q.variant_id);
+      // Warehouse khong co warehouse_id thi mac dinh loc kho duoc gan.
+      const effectiveWarehouse =
+        warehouseId ?? (actor.role === 'warehouse' ? (actor.warehouseId ?? undefined) : undefined);
+      authorizeReport(actor, 'stock', isCsv, {
+        orgId: actor.orgId,
+        warehouseId: effectiveWarehouse ?? null,
+      });
+      const report = computeStockReport(db, {
+        warehouseId: effectiveWarehouse,
+        variantId,
+        from: range.from,
+        to: range.to,
+      });
+      if (!isCsv) {
+        res.json(report);
+        return;
+      }
+      const detail: Record<string, unknown> = {
+        report: 'stock',
+        from: range.from,
+        to: range.to,
+        format: 'csv',
+      };
+      if (effectiveWarehouse !== undefined) detail.warehouse_id = effectiveWarehouse;
+      if (variantId !== undefined) detail.variant_id = variantId;
+      writeAudit(db, actor.orgId, actor.id, 'export-report', detail);
+      const minStockByVariant = new Map<number, number>();
+      for (const row of db
+        .prepare(
+          'SELECT v.id AS variant_id, p.min_stock AS min_stock FROM product_variants v JOIN products p ON p.id = v.product_id',
+        )
+        .all() as { variant_id: number; min_stock: number }[]) {
+        minStockByVariant.set(row.variant_id, row.min_stock);
+      }
+      const csv = stringify(
+        report.levels.map((l) => {
+          const minStock = minStockByVariant.get(l.variant_id) ?? 0;
+          return {
+            variant_id: l.variant_id,
+            sku: l.sku,
+            product_name: l.product_name,
+            warehouse_id: l.warehouse_id,
+            warehouse_name: l.warehouse_name,
+            on_hand: l.on_hand,
+            reserved: l.reserved,
+            available: l.available,
+            min_stock: minStock,
+            shortage: Math.max(0, minStock - l.available),
+          };
+        }),
+        {
+          header: true,
+          columns: [
+            'variant_id',
+            'sku',
+            'product_name',
+            'warehouse_id',
+            'warehouse_name',
+            'on_hand',
+            'reserved',
+            'available',
+            'min_stock',
+            'shortage',
+          ],
+        },
+      );
+      sendReportCsv(res, csv);
+    } catch (err) {
+      reportFail(res, err);
+    }
   });
-  app.get('/api/reports/reconciliation', requireAuth, (_req: TenantRequest, res: Response) => {
-    reportNotImplemented(res);
+
+  app.get('/api/reports/reconciliation', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const q = req.query as Record<string, unknown>;
+    try {
+      const isCsv = reportQueryIsCsv(req);
+      const range = reportQueryRange(req);
+      const branchId = resolveReportBranch(actor, q.branch_id);
+      const effectiveBranch =
+        branchId ?? (actor.role === 'sales' ? (actor.branchId ?? undefined) : undefined);
+      authorizeReport(actor, 'reconciliation', isCsv, {
+        orgId: actor.orgId,
+        branchId: effectiveBranch ?? null,
+      });
+      const report = computeReconciliationReport(db, {
+        from: range.from,
+        to: range.to,
+        branchId: effectiveBranch,
+      });
+      if (!isCsv) {
+        res.json(report);
+        return;
+      }
+      const detail: Record<string, unknown> = {
+        report: 'reconciliation',
+        from: range.from,
+        to: range.to,
+        format: 'csv',
+      };
+      if (effectiveBranch !== undefined) detail.branch_id = effectiveBranch;
+      writeAudit(db, actor.orgId, actor.id, 'export-report', detail);
+      const csv = stringify(
+        report.mismatches.map((m) => ({
+          kind: m.kind,
+          severity: m.severity,
+          order_code: m.order_code ?? '',
+          variant_id: m.variant_id ?? '',
+          warehouse_id: m.warehouse_id ?? '',
+          expected: m.expected ?? '',
+          actual: m.actual ?? '',
+          difference: m.difference ?? '',
+          note: m.note,
+        })),
+        {
+          header: true,
+          columns: [
+            'kind',
+            'severity',
+            'order_code',
+            'variant_id',
+            'warehouse_id',
+            'expected',
+            'actual',
+            'difference',
+            'note',
+          ],
+        },
+      );
+      sendReportCsv(res, csv);
+    } catch (err) {
+      reportFail(res, err);
+    }
   });
-  app.get('/api/reports/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
-    reportNotImplemented(res);
+
+  app.get('/api/reports/promotions', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const q = req.query as Record<string, unknown>;
+    try {
+      const isCsv = reportQueryIsCsv(req);
+      const range = reportQueryRange(req);
+      const code =
+        typeof q.code === 'string' && q.code.length > 0 ? q.code : undefined;
+      authorizeReport(actor, 'promotions', isCsv, {
+        orgId: actor.orgId,
+        branchId: actor.branchId ?? null,
+      });
+      const rows = computePromotionsReport(db, {
+        from: range.from,
+        to: range.to,
+        code,
+      });
+      if (!isCsv) {
+        res.json(rows);
+        return;
+      }
+      const detail: Record<string, unknown> = {
+        report: 'promotions',
+        from: range.from,
+        to: range.to,
+        format: 'csv',
+      };
+      if (code !== undefined) detail.code = code;
+      writeAudit(db, actor.orgId, actor.id, 'export-report', detail);
+      const totalRow = {
+        code: 'TOTAL',
+        used_count: rows.reduce((s, r) => s + r.used_count, 0),
+        released_count: rows.reduce((s, r) => s + r.released_count, 0),
+        total_discount: rows.reduce((s, r) => s + r.total_discount, 0),
+        order_count: rows.reduce((s, r) => s + r.order_count, 0),
+      };
+      const csv = stringify([...rows, totalRow], {
+        header: true,
+        columns: ['code', 'used_count', 'released_count', 'total_discount', 'order_count'],
+      });
+      sendReportCsv(res, csv);
+    } catch (err) {
+      reportFail(res, err);
+    }
   });
-  app.get('/api/reports/points', requireAuth, (_req: TenantRequest, res: Response) => {
-    reportNotImplemented(res);
+
+  app.get('/api/reports/points', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      const isCsv = reportQueryIsCsv(req);
+      const range = reportQueryRange(req);
+      authorizeReport(actor, 'points', isCsv, {
+        orgId: actor.orgId,
+        branchId: actor.branchId ?? null,
+      });
+      const report = computePointsReport(db, {
+        from: range.from,
+        to: range.to,
+      });
+      if (!isCsv) {
+        res.json(report);
+        return;
+      }
+      const detail: Record<string, unknown> = {
+        report: 'points',
+        from: range.from,
+        to: range.to,
+        format: 'csv',
+      };
+      writeAudit(db, actor.orgId, actor.id, 'export-report', detail);
+      const csv = stringify(
+        [
+          ...report.rows.map((r) => ({
+            customer_id: r.customer_id,
+            customer_name: r.customer_name,
+            earned: r.earned,
+            redeemed: r.redeemed,
+            redeemed_amount: r.redeemed_amount,
+          })),
+          {
+            customer_id: 'TOTAL',
+            customer_name: '',
+            earned: report.totals.earned_total,
+            redeemed: report.totals.redeemed_total,
+            redeemed_amount: report.totals.redeemed_amount,
+          },
+        ],
+        {
+          header: true,
+          columns: ['customer_id', 'customer_name', 'earned', 'redeemed', 'redeemed_amount'],
+        },
+      );
+      sendReportCsv(res, csv);
+    } catch (err) {
+      reportFail(res, err);
+    }
   });
 
   return app;
