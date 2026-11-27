@@ -43,6 +43,21 @@ import {
   type StockMovementType,
 } from './stock.js';
 import { assertSameOrg, tenantScope, type TenantRequest } from './tenant.js';
+import {
+  createCustomerTx,
+  createNoteTx,
+  deleteCustomerTx,
+  earnPointsTx,
+  exportCustomer,
+  getCustomerView,
+  listCustomerOrders,
+  listCustomers,
+  listNotes,
+  mergeTx,
+  pointsOf,
+  redeemPointsTx,
+  updateCustomerTx,
+} from './customers.js';
 
 const SESSION_COOKIE = 'omniflow_session';
 
@@ -4429,32 +4444,298 @@ export function createApp(db: DatabaseSync): Express {
     }
   });
 
-  // ---------- Khach hang + CRM (GOAL-008) — STUB cho Tester ----------
-  // Worker thay bang logic that: hien tai moi endpoint khach tra 501
-  // "not implemented" de test acceptance DO dung ly do. Route sua/xoa
-  // ghi chu/ledger cung la stub 501 (khong phai 404/405) de test "khong
-  // co endpoint" DO tren stub va xanh khi Worker bo route di (Express
-  // tra 404 mac dinh).
-  const customerNotImplemented = (_req: TenantRequest, res: Response): void => {
-    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
-  };
-  app.post('/api/customers', customerNotImplemented);
-  app.patch('/api/customers/:id', customerNotImplemented);
-  app.get('/api/customers', customerNotImplemented);
-  app.get('/api/customers/:id', customerNotImplemented);
-  app.get('/api/customers/:id/orders', customerNotImplemented);
-  app.post('/api/customers/:id/points/earn', customerNotImplemented);
-  app.post('/api/customers/:id/points/redeem', customerNotImplemented);
-  app.get('/api/customers/:id/points', customerNotImplemented);
-  app.post('/api/customers/:id/notes', customerNotImplemented);
-  app.get('/api/customers/:id/notes', customerNotImplemented);
-  app.post('/api/customers/:id/merge', customerNotImplemented);
-  app.get('/api/customers/:id/export', customerNotImplemented);
-  app.delete('/api/customers/:id', customerNotImplemented);
-  app.patch('/api/customers/:id/notes/:noteId', customerNotImplemented);
-  app.delete('/api/customers/:id/notes/:noteId', customerNotImplemented);
-  app.patch('/api/customers/:id/points/:pointId', customerNotImplemented);
-  app.delete('/api/customers/:id/points/:pointId', customerNotImplemented);
+  // ---------- Khach hang + CRM (GOAL-008, D26) ----------
+  // Service o src/customers.ts: ho so khach (chi nhanh chinh), lich su
+  // mua, tich/doi diem (1 diem/10.000d, 1 diem=100d), ghi chu append-only,
+  // phan khuc tinh o service, tim/loc, hop nhat co xac nhan, xuat/xoa.
+  // Tich/doi diem + hop nhat + tao khach + ghi chu qua withStockIdempotency
+  // (ten mien customer:points-earn / customer:points-redeem /
+  // customer:merge / customer:create / customer:note-create): kiem tra
+  // key + thuc thi + ghi key trong CUNG MOT transaction BEGIN IMMEDIATE.
+  // Gui lai tra response cu kem replayed: true. Khong co API sua/xoa ghi
+  // chu hay ledger (goi cac route do tra 404 mac dinh cua Express).
+
+  /** Map loi nghiep vu CRM (xem src/customers.ts) sang HTTP. */
+  function crmFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('conflict')) {
+      res.status(409).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý khách hàng' });
+  }
+
+  /** Key idempotency cho CRM, tu header hoac body (thieu key van chay). */
+  function crmKey(req: TenantRequest, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = (req.body ?? {}) as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `customer:${op}:${raw}`;
+  }
+
+  function parseCustomerId(req: TenantRequest, res: Response): number | null {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return null;
+    }
+    return id;
+  }
+
+  app.post(
+    '/api/customers',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      try {
+        const outcome = runStockOp(actor, crmKey(req, 'create'), () =>
+          createCustomerTx(db, actor, (req.body ?? {}) as Record<string, unknown>),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.patch(
+    '/api/customers/:id',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const result = runStockTransaction(db, () =>
+          updateCustomerTx(db, actor, id, (req.body ?? {}) as Record<string, unknown>),
+        );
+        res.json(result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'warehouse', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      try {
+        res.json(listCustomers(db, actor, req.query as Record<string, unknown>));
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers/:id',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'warehouse', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        res.json(getCustomerView(db, actor, id));
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers/:id/orders',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'warehouse', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        res.json(listCustomerOrders(db, actor, id, req.query as Record<string, unknown>));
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/customers/:id/points/earn',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const outcome = runStockOp(actor, crmKey(req, 'points-earn'), () =>
+          earnPointsTx(db, actor, id, (req.body ?? {}) as { order_id?: unknown }),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/customers/:id/points/redeem',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const outcome = runStockOp(actor, crmKey(req, 'points-redeem'), () =>
+          redeemPointsTx(
+            db,
+            actor,
+            id,
+            (req.body ?? {}) as { order_id?: unknown; points?: unknown },
+          ),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers/:id/points',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'warehouse', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        res.json(pointsOf(db, actor, id));
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/customers/:id/notes',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const outcome = runStockOp(actor, crmKey(req, 'note-create'), () =>
+          createNoteTx(db, actor, id, (req.body ?? {}) as { content?: unknown }),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers/:id/notes',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'warehouse', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        res.json(listNotes(db, actor, id, req.query as Record<string, unknown>));
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/customers/:id/merge',
+    requireAuth,
+    requireRole('owner', 'manager'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const outcome = runStockOp(actor, crmKey(req, 'merge'), () =>
+          mergeTx(
+            db,
+            actor,
+            id,
+            (req.body ?? {}) as { source_customer_id?: unknown; confirm?: unknown },
+          ),
+        );
+        if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+        else res.json(outcome.result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/customers/:id/export',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const result = runStockTransaction(db, () => exportCustomer(db, actor, id));
+        res.json(result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
+
+  app.delete(
+    '/api/customers/:id',
+    requireAuth,
+    requireRole('owner', 'manager'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parseCustomerId(req, res);
+      if (id === null) return;
+      try {
+        const result = runStockTransaction(db, () => deleteCustomerTx(db, actor, id));
+        res.json(result);
+      } catch (err) {
+        crmFail(res, err);
+      }
+    },
+  );
 
   return app;
 }

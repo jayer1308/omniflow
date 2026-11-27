@@ -93,7 +93,20 @@ export type Action =
   | 'review-return'
   | 'receive-return'
   | 'refund-return'
-  | 'view-returns';
+  | 'view-returns'
+  // GOAL-008: khách hàng / CRM (xem docs/RBAC.md, ma trận khách/CRM).
+  // Phạm vi gate bằng branchId = chi nhánh chính của khách (NULL = chưa
+  // gán: sales không thấy); delete-customer là action riêng, chỉ
+  // owner/manager (D26).
+  | 'create-customer'
+  | 'update-customer'
+  | 'view-customers'
+  | 'earn-points'
+  | 'redeem-points'
+  | 'add-note'
+  | 'merge-customers'
+  | 'export-customer'
+  | 'delete-customer';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -312,6 +325,46 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
     }
     case 'refund-return': {
       return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant';
+    }
+    // GOAL-008: ma trận khách/CRM (docs/RBAC.md). Tạo/sửa khách, tích/đổi
+    // điểm, ghi chú: owner/manager toàn org, sales chỉ khách thuộc chi
+    // nhánh mình (target.branchId NULL = chưa gán -> sales không tới được
+    // vì inScope(false)); warehouse/accountant không được tạo/sửa/tích/
+    // đổi/ghi. Xem khách: mọi vai theo phạm vi — owner/manager/warehouse/
+    // accountant toàn org, sales chỉ chi nhánh mình (kể cả khách chưa gán
+    // cũng không thấy). Hợp nhất/xóa: chỉ owner/manager. Xuất: owner/
+    // manager/accountant toàn org, sales chỉ chi nhánh mình, warehouse 403.
+    case 'create-customer':
+    case 'update-customer':
+    case 'earn-points':
+    case 'redeem-points':
+    case 'add-note': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'view-customers': {
+      if (
+        actor.role === 'owner' ||
+        actor.role === 'manager' ||
+        actor.role === 'warehouse' ||
+        actor.role === 'accountant'
+      ) {
+        return true;
+      }
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'merge-customers':
+    case 'delete-customer': {
+      return actor.role === 'owner' || actor.role === 'manager';
+    }
+    case 'export-customer': {
+      if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
+        return true;
+      }
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
     }
     default:
       return false;
