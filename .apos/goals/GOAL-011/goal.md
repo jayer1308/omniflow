@@ -1,6 +1,6 @@
 # GOAL-011 v1: OmniFlow co nghiep vu thong bao + cong viec nen: gui thong bao qua adapter email fake khi don xac nhan/hoan tat/huy, thanh toan paid/failed, hoan tien, giao shipped/delivered/failed, tra hang duyet/tu choi/nhan, ton kho thap, khuyen mai sap het han (log append-only, event_key UNIQUE chong gui trung, cai dat nhan theo nguoi dung); hang doi job trong tien trinh (send-notification/low-stock-scan/promo-expiry-scan, retry toi da 3 lan + backoff 60s/120s, job lap theo lich 60 phut co dedupe theo ngay, khoi phuc job do dang khi khoi dong, chay tay + retry tay qua API); RBAC theo ma tran thong bao/job + audit log chi cho that bai/retry tay; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc thong bao/job moi (CHK-2 timeoutMs 20 phut tu v1); 4 yeu cau mo coi bao cao (R-19 GOAL-006, R-17 GOAL-007, R-18 GOAL-008, R-16 GOAL-009) duoc loai tru co ly do (out-of-scope)
 
-Status: approved
+Status: testing
 
 ```json
 {
