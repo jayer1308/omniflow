@@ -588,3 +588,86 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
 - Đổi khi: cổng thanh toán thật (ngoài phạm vi vĩnh viễn), hoặc cho phép
   trả một phần tiền theo chính sách khác (ví dụ trừ phí) — khi đó số tiền
   hoàn không còn bằng tổng snapshot nữa.
+
+## D26 — Mô hình khách hàng + CRM (GOAL-008, 27/11/2026)
+
+- Quyết định (GOAL-008): khách hàng là dữ liệu cấp org, có chi nhánh
+  chính `customers.branch_id` NULL = chưa gán (khách mua ở nhiều chi
+  nhánh vẫn chỉ có MỘT chi nhánh chính; lịch sử mua tính theo org, không
+  theo chi nhánh). `customers`: `org_id` NOT NULL FK, `name` NOT NULL,
+  `phone`/`email`/`address` NULL, `status` CHECK `IN ('active','merged')`
+  mặc định `'active'`, `merged_into_id` NULL FK tới `customers`,
+  `UNIQUE(org_id, phone)` (SQLite cho nhiều NULL — trùng điện thoại chỉ
+  tính với khách `active`, trùng → 409). Migration 013 tạo thêm
+  `customer_points` (ledger append-only: `type` CHECK `IN
+  ('earn','redeem')`, `points` CHECK `> 0`, `reason` NOT NULL,
+  `order_id` NULL FK, `created_by` NOT NULL FK) và `customer_notes`
+  (append-only: `author_id` NOT NULL FK, `content` NOT NULL), cộng
+  `ALTER TABLE orders ADD customer_id NULL FK + points_discount INTEGER
+  NOT NULL DEFAULT 0 CHECK >= 0` (đơn cũ giữ NULL/0, hành vi không đổi).
+  `POST /api/orders` nhận thêm `customer_id` optional (không tồn tại →
+  404, ngoài org → 403, khách `merged` → 400; không gửi thì như trước).
+- Tích điểm: chỉ đơn `completed` thuộc khách, 1 điểm / 10.000đ trên
+  (`order_total` − tổng hoàn `completed` của đơn tại thời điểm tích),
+  làm tròn xuống; tổng sau hoàn < 10.000đ → 400, không ghi ledger 0
+  điểm; mỗi đơn tích 1 lần. Điểm KHÔNG hết hạn (không có cột
+  `expires_at`, không có job hết hạn), KHÔNG bị thu hồi khi đơn bị hoàn
+  tiền sau đó (không có clawback trong goal này). Số dư = tổng `earn` −
+  tổng `redeem` tính ở service, KHÔNG lưu cột số dư riêng.
+- Đổi điểm: chỉ đơn `draft` của chính khách, 1 điểm = 100đ, discount =
+  min(`points` × 100, `order_total`); số điểm trừ vẫn là số điểm đã gửi
+  dù tiền trừ bị cắt ở tổng đơn; một đơn chỉ đổi 1 lần; điểm không bao
+  giờ âm. Ghi ledger `redeem` + cập nhật `orders.points_discount` trong
+  CÙNG MỘT transaction `BEGIN IMMEDIATE`. Đối soát dùng lại
+  `computePaymentSummary` (D22): `outstanding` = `order_total` −
+  `points_discount` − `paid_total`; `payment_status` GIỮ NGUYÊN logic
+  D22 trên (`paid_total`, `refunded_total`, `order_total`) — đơn đổi
+  điểm hết tổng mà chưa trả đồng nào vẫn `unpaid`. Tích điểm tính trên
+  `order_total`, KHÔNG trừ `points_discount` của chính đơn đó.
+- Phân khúc tính ở service mỗi lần đọc, KHÔNG lưu cột `segment`:
+  VIP khi `total_spent` ≥ 5.000.000đ HOẶC `order_count` ≥ 10 đơn
+  completed; ngủ quên khi có ≥ 1 đơn completed và lần mua cuối > 90
+  ngày; thường xuyên khi `order_count` ≥ 3; còn lại mới. Thứ tự ưu tiên
+  VIP → ngủ quên → thường xuyên → mới (VIP 100 ngày không mua vẫn VIP).
+  `total_spent` = tổng `total` các đơn `completed`, CHƯA trừ hoàn tiền;
+  `order_count` = số đơn `completed`; `last_order_at` = `created_at`
+  đơn `completed` mới nhất (NULL khi chưa có).
+- Hợp nhất có xác nhận: `POST /api/customers/:id/merge` bắt buộc
+  `confirm: true` (thiếu/sai → 400, không làm gì); `:id` là hồ sơ GIỮ
+  LẠI. Trong CÙNG MỘT transaction: mọi đơn + ledger + ghi chú của nguồn
+  chuyển sang hồ sơ giữ; nguồn chuyển `status` `'merged'`,
+  `merged_into_id` = id hồ sơ giữ, `phone`/`email` về NULL; row nguồn
+  GIỮ LẠI (không xóa) để audit còn trỏ được. Khách `merged` không tạo
+  đơn/tích/đổi điểm/ghi chú/hợp nhất tiếp (→ 400, trừ xem/export).
+- Export + xóa + PII: `GET /api/customers/:id/export` trả `{customer,
+  orders (kèm items), points: {balance, ledger}, notes}` + 1 audit log
+  (khách `merged` vẫn export được, orders/points/notes rỗng kèm
+  `merged_into_id`). `audit_log.detail` của MỌI thao tác khách KHÔNG
+  chứa `phone`/`email`/`address` (chỉ id + số liệu); log server cũng
+  không in phone/email. Xóa cứng (`DELETE /api/customers/:id`) chỉ khi
+  khách CHƯA CÓ đơn nào (có đơn → 400; đã `merged` → 400), xóa kèm ghi
+  chú + ledger trong cùng transaction + 1 audit log; không có cột
+  `deleted_at`, không có thùng rác.
+- RBAC: `can()` thêm 9 actions `create-customer`, `update-customer`,
+  `view-customers`, `earn-points`, `redeem-points`, `add-note`,
+  `merge-customers`, `export-customer`, `delete-customer` (xóa là action
+  RIÊNG chỉ `owner`/`manager`, không dùng chung `update-customer`).
+  Sales chỉ thấy/thao tác khách thuộc chi nhánh mình; khách chưa gán chi
+  nhánh (`branch_id` NULL) thì sales không thấy (403 khi gọi trực tiếp,
+  bị lọc khỏi danh sách); `owner`/`manager`/`accountant` thấy mọi khách
+  (xem ma trận đầy đủ ở `docs/RBAC.md`).
+- Idempotency: `withStockIdempotency` (GOAL-004) trong cùng transaction
+  `BEGIN IMMEDIATE`, tên miền `customer:points-earn:<key>` /
+  `customer:points-redeem:<key>` / `customer:merge:<key>` (thêm
+  `customer:create:<key>` cho tạo khách và `customer:note-create:<key>`
+  cho ghi chú); gửi lại cùng key trả đúng response cũ kèm `replayed:
+  true`, không cộng/trừ điểm hay chuyển hồ sơ lần 2. App một tiến trình
+  (D1) nên bảo vệ race chỉ có ý nghĩa trong một process; đa process
+  ngoài phạm vi.
+- Lý do: số dư/segment/tóm tắt tính ở service để không lệch khi đơn mới
+  hoàn tất (như đối soát D22); ledger/ghi chú append-only để lịch sử
+  không bị sửa; hợp nhất giữ row nguồn để audit còn trỏ được và để
+  điện thoại được giải phóng (phone về NULL) mà lịch sử không mất.
+- Đổi khi: cho điểm hết hạn (thêm cột + job), thu hồi điểm khi hoàn tiền
+  sau (clawback), hoặc khuyến mãi GOAL-009 (mã giảm giá — điểm đổi ở đây
+  là điểm tích lũy CRM, không phải mã giảm giá).

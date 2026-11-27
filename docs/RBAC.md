@@ -270,6 +270,64 @@ trong body; tên miền key `shipment:create:<key>` /
 `return:refund:<key>`; gửi lại trả đúng response cũ kèm
 `replayed: true`.
 
+### Ma trận quyền khách hàng + CRM (GOAL-008, D26)
+
+Khách hàng là dữ liệu cấp org, có chi nhánh chính `branch_id` NULL = chưa
+gán. Phạm vi gate bằng `branchId` của khách (kiểu `Target` đã có). Helper
+`can()` mở rộng 9 actions: `create-customer`, `update-customer`,
+`view-customers`, `earn-points`, `redeem-points`, `add-note`,
+`merge-customers`, `export-customer`, `delete-customer` (xóa là action
+riêng chỉ `owner`/`manager`). Mọi endpoint khách qua `requireRole` +
+`can()`.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Tạo khách (`POST /api/customers`) | Được | Được | Được (khách mới thuộc chi nhánh của mình; gửi `branch_id` khác → 403; không gửi `branch_id` thì khách thuộc chi nhánh mình) | Không (403) | Không (403) |
+| Sửa khách (`PATCH /api/customers/:id`) | Được | Được | Được (khách thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Xem/tìm khách (`GET /api/customers...`, `GET /api/customers/:id`, `GET /api/customers/:id/orders`, `GET /api/customers/:id/points`, `GET /api/customers/:id/notes`) | Được, toàn org | Được, toàn org | Được, chỉ khách thuộc chi nhánh của mình | Được, toàn org (chỉ xem, để tra khách khi giao/nhận hàng) | Được, toàn org (chỉ xem) |
+| Tích điểm (`POST /api/customers/:id/points/earn`) | Được | Được | Được (khách thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Đổi điểm (`POST /api/customers/:id/points/redeem`) | Được | Được | Được (khách thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Ghi chú (`POST /api/customers/:id/notes`) | Được | Được | Được (khách thuộc chi nhánh của mình) | Không ghi (403); xem được toàn org (chỉ xem) | Không ghi (403); xem được toàn org (chỉ xem) |
+| Hợp nhất (`POST /api/customers/:id/merge`) | Được | Được | Không (403) | Không (403) | Không (403) |
+| Xuất dữ liệu (`GET /api/customers/:id/export`) | Được, toàn org | Được, toàn org | Được, chỉ khách thuộc chi nhánh của mình | Không (403) | Được, toàn org |
+| Xóa khách (`DELETE /api/customers/:id`) | Được (chỉ khách chưa có đơn) | Được (chỉ khách chưa có đơn) | Không (403) | Không (403) | Không (403) |
+
+Ghi chú: `sales` xem/tích/đổi/ghi chú khách ngoài chi nhánh của mình →
+403; khách chưa gán chi nhánh (`branch_id` NULL) thì `sales` không thấy
+(403 khi gọi trực tiếp, bị lọc khỏi danh sách); mọi vai xem khách ngoài
+org → 403. Xem lịch sử điểm (`GET /api/customers/:id/points`) và ghi chú
+theo luật xem khách (cùng action `view-customers`).
+
+### Endpoints mới (GOAL-008)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/customers` | owner / manager / sales (khách mới thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `PATCH /api/customers/:id` | owner / manager / sales (khách thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `GET /api/customers`, `GET /api/customers/:id`, `GET /api/customers/:id/orders`, `GET /api/customers/:id/points`, `GET /api/customers/:id/notes` | mọi vai, lọc theo phạm vi (sales: chỉ chi nhánh mình, không thấy khách chưa gán; warehouse/accountant: toàn org, chỉ xem) |
+| `POST /api/customers/:id/points/earn`, `POST /api/customers/:id/points/redeem` | owner / manager / sales (khách thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `POST /api/customers/:id/notes` | owner / manager / sales (khách thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `POST /api/customers/:id/merge` | owner / manager; sales / warehouse / accountant → 403 |
+| `GET /api/customers/:id/export` | owner / manager / accountant toàn org, sales chỉ chi nhánh mình; warehouse → 403 |
+| `DELETE /api/customers/:id` | owner / manager (chỉ khách chưa có đơn); sales / warehouse / accountant → 403 |
+
+Audit log: mọi thao tác tạo/sửa khách, tích/đổi điểm, ghi chú, hợp nhất,
+xuất dữ liệu, xóa khách đều ghi `audit_log` (`action`
+`create-customer`/`update-customer`/`earn-points`/`redeem-points`/
+`add-note`/`merge-customers`/`export-customer`/`delete-customer`,
+`detail` JSON với `target_customer_id`, `target_order_id` khi có,
+`points` khi tích/đổi, `source_customer_id` khi hợp nhất, KHÔNG chứa
+`phone`/`email`/`address`, KHÔNG chứa thông tin thẻ). Xem log theo luật
+GOAL-002. `customer_points`/`customer_notes` là lịch sử chi tiết
+(append-only), `audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai
+đều phải có, không thay nhau. Không có API sửa/xóa ghi chú hay ledger
+(gọi → 404). Idempotency: header `Idempotency-Key` hoặc
+`idempotency_key` trong body; tên miền key
+`customer:points-earn:<key>` / `customer:points-redeem:<key>` /
+`customer:merge:<key>` (thêm `customer:create:<key>` cho tạo khách và
+`customer:note-create:<key>` cho ghi chú); gửi lại trả đúng response cũ
+kèm `replayed: true`.
+
 ### Endpoints mới (GOAL-005)
 
 | Endpoint | Vai trò |

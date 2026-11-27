@@ -56,6 +56,10 @@ export interface OrderRow {
   code: string;
   channel: string;
   customer_name: string | null;
+  /** GOAL-008: khách gắn với đơn (NULL = đơn không gắn khách, như trước). */
+  customer_id: number | null;
+  /** GOAL-008: tiền đã trừ bằng điểm đổi (mặc định 0). */
+  points_discount: number;
   status: OrderStatus;
   total: number;
   created_by: number;
@@ -102,6 +106,8 @@ export interface OrderCreateInput {
   warehouse_id?: unknown;
   channel?: unknown;
   customer_name?: unknown;
+  /** GOAL-008: id khách gắn với đơn (optional, không gửi thì như trước). */
+  customer_id?: unknown;
   items?: unknown;
 }
 
@@ -306,6 +312,22 @@ export function createOrderTx(db: DatabaseSync, actor: Actor, body: OrderCreateI
     throw forbidden('bạn không được phép tạo đơn');
   }
   if (warehouse.status !== 'active') throw bad('kho không hoạt động, không tạo đơn được');
+  // GOAL-008: customer_id optional — có gửi thì khách phải tồn tại trong
+  // org (không tồn tại -> 404, ngoài org -> 403, khách merged -> 400);
+  // không gửi thì đơn không gắn khách như trước.
+  let customerId: number | null = null;
+  if (body.customer_id !== undefined && body.customer_id !== null) {
+    if (typeof body.customer_id !== 'number' || !Number.isInteger(body.customer_id)) {
+      throw bad('customer_id không hợp lệ');
+    }
+    const customer = db
+      .prepare('SELECT org_id, status FROM customers WHERE id = ?')
+      .get(body.customer_id) as { org_id: number; status: string } | undefined;
+    if (!customer) throw notFound('không tìm thấy khách hàng');
+    if (customer.org_id !== orgId) throw forbidden('khách hàng không thuộc doanh nghiệp của bạn');
+    if (customer.status === 'merged') throw bad('khách hàng đã hợp nhất, không tạo đơn mới được');
+    customerId = body.customer_id;
+  }
   // Giai quyet gia tung dong + kiem tra bien the/san pham.
   const customerName =
     typeof body.customer_name === 'string' ? body.customer_name : null;
@@ -346,10 +368,10 @@ export function createOrderTx(db: DatabaseSync, actor: Actor, body: OrderCreateI
     db
       .prepare(
         `INSERT INTO orders (org_id, branch_id, warehouse_id, code, channel, customer_name,
-          status, total, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
+          customer_id, status, total, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
       )
-      .run(orgId, branchId, warehouseId, code, channel, customerName, total, actor.id, nowIso, nowIso)
+      .run(orgId, branchId, warehouseId, code, channel, customerName, customerId, total, actor.id, nowIso, nowIso)
       .lastInsertRowid,
   );
   priced.forEach((p, i) => {

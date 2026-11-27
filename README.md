@@ -25,8 +25,8 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM)
 ```
 
 ## Giao hàng + trả hàng (GOAL-007)
@@ -138,6 +138,37 @@ nhánh với fallback 8 bước + lịch sử giá append-only; import/export CS
 `GET /api/products/:id/price-history`,
 `POST /api/products/import/preview`, `POST /api/products/import`,
 `GET /api/products/export`.
+
+## Khách hàng + CRM (GOAL-008)
+
+Hồ sơ khách hàng cấp org, chi nhánh chính (`branch_id` NULL = chưa gán),
+điện thoại duy nhất trong org (trùng khách `active` → 409); lịch sử mua
+chỉ tính đơn `completed` (`total_spent` CHƯA trừ hoàn tiền). Tích điểm
+1 điểm / 10.000đ trên tổng đơn sau hoàn (làm tròn xuống, chỉ đơn
+`completed`, mỗi đơn 1 lần, điểm KHÔNG hết hạn, không thu hồi khi hoàn
+tiền sau); đổi điểm 1 điểm = 100đ trừ tiền đơn `draft` mới (discount =
+min(`points` × 100, `order_total`), một đơn chỉ đổi 1 lần, điểm không
+âm; `outstanding` trừ `points_discount` nhưng `payment_status` giữ
+nguyên logic D22). Ghi chú chăm sóc append-only; phân khúc tính ở
+service, KHÔNG lưu cột riêng (VIP ≥ 5.000.000đ hoặc ≥ 10 đơn; ngủ quên
+khi lần mua cuối > 90 ngày; thường xuyên ≥ 3 đơn; còn lại mới; ưu tiên
+VIP → ngủ quên → thường xuyên → mới). Tìm/lọc theo tên/điện thoại/phân
+khúc/chi nhánh. Hợp nhất hồ sơ trùng bắt buộc `confirm: true` (chuyển
+mọi đơn + điểm + ghi chú trong cùng transaction, nguồn chuyển `merged`,
+`phone`/`email` về NULL, row nguồn giữ lại). Xuất dữ liệu đủ 4 phần
+(hồ sơ + đơn + điểm + ghi chú); xóa cứng chỉ khi khách chưa có đơn;
+`audit_log.detail` KHÔNG chứa `phone`/`email`/`address`. Idempotency
+(`customer:points-earn:<key>` / `customer:points-redeem:<key>` /
+`customer:merge:<key>`, gửi lại trả `replayed: true`) + chống race
+trong transaction `BEGIN IMMEDIATE`; RBAC khách/CRM theo vai + phạm vi
+chi nhánh chính (xóa chỉ owner/manager, action `delete-customer`
+riêng). Xem `docs/RBAC.md` (ma trận khách/CRM) và `docs/DECISIONS.md`
+(D26). Endpoint chính: `POST/PATCH/GET /api/customers`,
+`GET /api/customers/:id/orders|points|notes|export`,
+`POST /api/customers/:id/points/earn|redeem`,
+`POST /api/customers/:id/notes|merge`,
+`DELETE /api/customers/:id`; `POST /api/orders` nhận thêm
+`customer_id` optional.
 
 ## Stack
 

@@ -386,6 +386,51 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );`,
   },
+  {
+    // GOAL-008: khách hàng + CRM (D26). customers cấp org, branch_id NULL
+    // là chi nhánh chính chưa gán; UNIQUE(org_id, phone) cho phép nhiều
+    // NULL trên SQLite; customer_points/customer_notes append-only (chỉ
+    // INSERT, không API sửa/xóa); orders thêm customer_id NULL FK +
+    // points_discount mặc định 0 (đơn cũ giữ NULL/0, hành vi không đổi).
+    // Không có cột segment (tính ở service) và không có cột expires_at
+    // (điểm không hết hạn).
+    version: 13,
+    sql: `CREATE TABLE IF NOT EXISTS customers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      branch_id INTEGER REFERENCES branches(id),
+      name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'merged')),
+      merged_into_id INTEGER REFERENCES customers(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (org_id, phone)
+    );
+    CREATE TABLE IF NOT EXISTS customer_points (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      type TEXT NOT NULL CHECK (type IN ('earn', 'redeem')),
+      points INTEGER NOT NULL CHECK (points > 0),
+      reason TEXT NOT NULL,
+      order_id INTEGER REFERENCES orders(id),
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS customer_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      author_id INTEGER NOT NULL REFERENCES users(id),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE orders ADD COLUMN customer_id INTEGER NULL REFERENCES customers(id);
+    ALTER TABLE orders ADD COLUMN points_discount INTEGER NOT NULL DEFAULT 0 CHECK (points_discount >= 0);`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {
