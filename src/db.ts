@@ -431,6 +431,50 @@ const MIGRATIONS: Migration[] = [
     ALTER TABLE orders ADD COLUMN customer_id INTEGER NULL REFERENCES customers(id);
     ALTER TABLE orders ADD COLUMN points_discount INTEGER NOT NULL DEFAULT 0 CHECK (points_discount >= 0);`,
   },
+  {
+    // GOAL-009: khuyen mai (D27). promotions cap org, code chuan hoa
+    // UPPERCASE + trim o service, UNIQUE(org_id, code); cap chi co y
+    // nghia voi loai percent (service chan cap voi fixed); channels JSON
+    // NULL = moi kenh; branch_id NULL = moi chi nhanh; valid_from/to
+    // NULL = khong gioi han; usage_limit/per_customer_limit NULL =
+    // khong gioi han; promotion_usages append-only (chi INSERT + chuyen
+    // used -> released khi huy don); orders them promotion_id NULL FK +
+    // promo_discount mac dinh 0 (don cu giu NULL/0, total snapshot goc
+    // KHONG bi sua khi ap ma).
+    version: 14,
+    sql: `CREATE TABLE IF NOT EXISTS promotions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      code TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('percent', 'fixed')),
+      value INTEGER NOT NULL CHECK (value > 0),
+      cap INTEGER NULL CHECK (cap IS NULL OR cap > 0),
+      min_order_total INTEGER NOT NULL DEFAULT 0 CHECK (min_order_total >= 0),
+      channels TEXT NULL,
+      branch_id INTEGER NULL REFERENCES branches(id),
+      valid_from TEXT NULL,
+      valid_to TEXT NULL,
+      usage_limit INTEGER NULL CHECK (usage_limit IS NULL OR usage_limit > 0),
+      per_customer_limit INTEGER NULL CHECK (per_customer_limit IS NULL OR per_customer_limit > 0),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'locked')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (org_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS promotion_usages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promotion_id INTEGER NOT NULL REFERENCES promotions(id),
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      customer_id INTEGER NULL REFERENCES customers(id),
+      discount_amount INTEGER NOT NULL CHECK (discount_amount > 0),
+      status TEXT NOT NULL DEFAULT 'used' CHECK (status IN ('used', 'released')),
+      released_at TEXT NULL,
+      release_reason TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE orders ADD COLUMN promotion_id INTEGER NULL REFERENCES promotions(id);
+    ALTER TABLE orders ADD COLUMN promo_discount INTEGER NOT NULL DEFAULT 0 CHECK (promo_discount >= 0);`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

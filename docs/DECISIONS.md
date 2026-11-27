@@ -671,3 +671,102 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
 - Đổi khi: cho điểm hết hạn (thêm cột + job), thu hồi điểm khi hoàn tiền
   sau (clawback), hoặc khuyến mãi GOAL-009 (mã giảm giá — điểm đổi ở đây
   là điểm tích lũy CRM, không phải mã giảm giá).
+
+## D27 — Mô hình khuyến mãi (GOAL-009, 27/11/2026)
+
+- Mã giảm giá: bảng `promotions` cấp org, `code` chuẩn hóa UPPERCASE +
+  trim khi tạo, `UNIQUE(org_id, code)`; `code` không đổi sau khi tạo
+  (PATCH gửi `code` → 400 — muốn mã khác thì tạo mã mới). Loại giảm:
+  `percent` (`value` nguyên 1..100, `cap` nguyên > 0, chỉ percent) hoặc
+  `fixed` (`value` nguyên > 0; gửi `cap` với fixed → 400). Điều kiện áp:
+  `min_order_total` (mặc định 0), `channels` JSON (NULL = mọi kênh),
+  `branch_id` (NULL = mọi chi nhánh), `valid_from`/`valid_to` ISO 8601
+  (NULL = không giới hạn, `valid_from` >= `valid_to` → 400),
+  `usage_limit`/`per_customer_limit` (NULL = không giới hạn).
+  `status` `active`/`locked` (khóa = đặt `locked`, mở lại = `active`).
+  Không có endpoint DELETE vĩnh viễn cho mã (chỉ khóa bằng status).
+- Tính giảm là hàm thuần `calculateDiscount(total, promo,
+  pointsDiscount)` trên tổng đơn GỐC (snapshot GOAL-005, CHƯA trừ điểm):
+  percent → `floor(total × value / 100)` rồi min với `cap` và với phần
+  còn lại sau điểm (`total − points_discount`); fixed → `min(value,
+  total − points_discount`). Không bao giờ âm,
+  `promo_discount + points_discount <= total`.
+- Luật chồng giảm với điểm GOAL-008 — MỘT luật duy nhất, không phụ thuộc
+  thứ tự áp: gọi C = số giảm của mã TRƯỚC khi cắt ở phần còn lại
+  (percent: `min(floor(total × value / 100), cap)`; fixed: `value`),
+  P = điểm muốn đổi × 100. Tổng giảm cuối = `min(C + P, total)`. Áp mã
+  trước: `promo_discount = min(C, total − points_discount hiện tại)`,
+  rồi đổi điểm sau bị cắt ở `total − promo_discount`. Đổi điểm trước:
+  `points_discount = min(P, total)`, rồi áp mã sau bị cắt ở
+  `total − points_discount`. Sửa tối thiểu ở `src/customers.ts` redeem:
+  `discount = min(points × 100, order_total − promo_discount)` — không
+  đổi hành vi khi đơn chưa có mã. KHÔNG tính % trên tổng đã trừ điểm.
+- Áp mã: chỉ đơn `draft`, một đơn một mã, trong CÙNG MỘT transaction
+  `BEGIN IMMEDIATE`: kiểm tra mọi điều kiện (mã tồn tại trong org,
+  chưa khóa, đúng kênh/chi nhánh, trong thời gian hiệu lực, đủ tổng tối
+  thiểu, còn lượt tổng + lượt mỗi khách — lượt mỗi khách chỉ tính khi
+  đơn có `customer_id`, đơn không gắn khách chỉ tính giới hạn tổng) +
+  ghi 1 dòng `promotion_usages` (status `used`, `discount_amount` =
+  số giảm đã tính) + cập nhật `orders.promotion_id`/`promo_discount` +
+  1 audit log. `orders.total` là tổng snapshot gốc, KHÔNG bị sửa khi áp
+  mã. Không có endpoint gỡ mã khỏi đơn (muốn đổi mã thì hủy đơn rồi tạo
+  đơn mới).
+- Giới hạn dùng: tổng lượt = số dòng `promotion_usages` status `used`
+  của mã (không tính dòng `released`); lượt mỗi khách = số dòng `used`
+  của mã với `customer_id` đó. Chống vượt giới hạn đồng thời bằng
+  transaction `BEGIN IMMEDIATE` + `withStockIdempotency` (GOAL-004):
+  10 lần áp cùng mã giới hạn 5 lượt cùng lúc → đúng 5 thành công.
+  App một tiến trình (D1), bảo vệ race chỉ có ý nghĩa trong một process;
+  đa process ngoài phạm vi.
+- Hủy đơn có mã thì hoàn lượt dùng: trong CÙNG transaction với đổi trạng
+  thái đơn (`transitionOrderTx` cancel), dòng usage của đơn chuyển
+  `used` → `released` (`released_at` = thời điểm hủy, `release_reason`
+  = mã đơn đã hủy), `orders.promo_discount` về 0, `promotion_id` về
+  NULL — lượt dùng giải phóng, khách dùng lại được (kể cả giới hạn mỗi
+  khách). Hủy đơn không có mã thì không động tới bảng usages. Trả
+  hàng/hoàn tiền (GOAL-007) và hoàn tiền trực tiếp (GOAL-006) KHÔNG hoàn
+  lượt dùng: mã đã dùng thật khi đặt đơn, số tiền hoàn tính theo snapshot
+  giá (D25).
+- Đối soát: `computePaymentSummary` mở rộng `outstanding =
+  order_total − points_discount − promo_discount − paid_total`;
+  `payment_status` GIỮ NGUYÊN logic D22 (như GOAL-008 đã làm với điểm):
+  đơn đổi điểm/mã hết tổng mà chưa trả đồng nào vẫn `unpaid`; đơn đã trả
+  đủ phần còn phải trả sau giảm nhưng chưa bằng tổng gốc thì vẫn
+  `partially_paid` theo logic D22. Tích điểm tính trên `order_total`
+  gốc, KHÔNG trừ `promo_discount` (như D26 không trừ `points_discount`):
+  đơn 250.000đ áp mã 10% vẫn tích 25 điểm khi completed.
+- RBAC: `can()` thêm 4 actions `create-promotion`, `update-promotion`,
+  `apply-promotion`, `view-promotions` — tạo/sửa/khóa: chỉ
+  owner/manager; áp mã: owner/manager toàn org, sales chỉ đơn thuộc chi
+  nhánh mình; xem mã: owner/manager/accountant toàn org, sales chỉ mã
+  `branch_id` NULL hoặc đúng chi nhánh mình, warehouse 403. Mọi endpoint
+  qua `requireRole` + `can()` (xem ma trận đầy đủ ở `docs/RBAC.md`).
+- Audit: tạo/sửa/khóa mã + áp mã + hoàn lượt dùng khi hủy đơn đều ghi
+  `audit_log` (`action` `create-promotion` / `update-promotion` /
+  `apply-promotion` / `promotion-usage-released`, `detail` JSON với
+  `target_promotion_id`, `promotion_code`, `target_order_id`/`order_code`
+  khi áp mã hoặc hoàn lượt, `discount` khi áp mã, KHÔNG chứa thông tin
+  thẻ). Hoàn lượt dùng khi hủy đơn chọn cách ghi 1 audit RIÊNG
+  `promotion-usage-released` (thay vì ghi kèm trong detail của
+  `cancel-order`) để bản ghi hoàn lượt tìm được trực tiếp theo
+  `target_promotion_id` mà không phải parse detail của audit hủy đơn.
+  `promotion_usages` là lịch sử dùng mã chi tiết (append-only, chỉ
+  INSERT + chuyển `used` → `released`, không có API DELETE usage),
+  `audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai đều phải có,
+  không thay nhau.
+- Idempotency: `withStockIdempotency` (GOAL-004) trong cùng transaction
+  `BEGIN IMMEDIATE`, tên miền `promotion:create:<key>` /
+  `promotion:apply:<key>` (header `Idempotency-Key` hoặc
+  `idempotency_key` trong body); gửi lại cùng key trả đúng response cũ
+  kèm `replayed: true`, không tạo mã/usage mới, không trừ lượt dùng lần
+  nữa. KHÔNG dùng `withIdempotency` của GOAL-001 cho áp mã (nó kiểm tra
+  key ngoài transaction).
+- Lý do: lịch sử dùng mã append-only để lượt dùng đã giải phóng vẫn tra
+  được (dòng cũ chuyển `released`, không xóa); tính giảm thuần trên tổng
+  gốc để hai chiều áp mã/đổi điểm cho cùng kết quả; outstanding trừ cả
+  điểm lẫn mã nhưng `payment_status` giữ D22 để không vỡ hành vi đã khóa
+  của GOAL-006/007/008 (GOAL-010 đối soát tổng hợp có thể xem lại ngữ
+  nghĩa `payment_status` với `tests revise` nếu cần).
+- Đổi khi: cho phép gỡ/đổi mã trên đơn nháp (thêm endpoint gỡ mã + hoàn
+  lượt dùng), mã dùng nhiều lần trên cùng đơn, hoặc khuyến mãi theo
+  nhóm sản phẩm (hiện chỉ theo tổng đơn).

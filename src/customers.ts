@@ -461,6 +461,8 @@ interface OrderRowLite {
   status: string;
   total: number;
   points_discount: number;
+  /** GOAL-009: tiền đã giảm bằng mã (mặc định 0). */
+  promo_discount: number;
 }
 
 function loadOrderLite(db: DatabaseSync, orderId: number): OrderRowLite | undefined {
@@ -560,7 +562,10 @@ export function redeemPointsTx(
   }
   const balance = pointsBalanceFor(db, customerId);
   if (body.points > balance) throw bad('số điểm đổi vượt số dư');
-  const discount = Math.min(body.points * 100, order.total);
+  // GOAL-009 (D27): luật chồng giảm MỘT luật duy nhất — đổi điểm cắt ở
+  // phần còn lại sau mã (total - promo_discount); đơn chưa có mã thì
+  // promo_discount = 0 nên hành vi không đổi.
+  const discount = Math.min(body.points * 100, order.total - (order.promo_discount ?? 0));
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO customer_points (customer_id, org_id, type, points, reason, order_id, created_by, created_at)

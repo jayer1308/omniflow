@@ -170,6 +170,40 @@ riêng). Xem `docs/RBAC.md` (ma trận khách/CRM) và `docs/DECISIONS.md`
 `DELETE /api/customers/:id`; `POST /api/orders` nhận thêm
 `customer_id` optional.
 
+## Khuyến mãi (GOAL-009)
+
+Mã giảm giá cấp org, `code` chuẩn hóa UPPERCASE + trim, duy nhất trong
+org (trùng → 409), `code` không đổi sau khi tạo (PATCH gửi `code` →
+400). Loại giảm: `%` (`value` 1..100, có `cap`) hoặc số tiền cố định
+(`value` > 0); điều kiện áp: tổng đơn tối thiểu, kênh bán, chi nhánh,
+thời gian hiệu lực, giới hạn dùng tổng + mỗi khách (NULL = không giới
+hạn). Áp mã vào đơn `draft` (một đơn một mã, trong cùng transaction
+`BEGIN IMMEDIATE`: ghi `promotion_usages` + cập nhật
+`orders.promotion_id`/`promo_discount` + audit log); số tiền giảm tính
+trên tổng đơn gốc bằng hàm thuần `calculateDiscount` (%, cap, cố định,
+cắt ở tổng đơn và ở phần còn lại sau điểm). Luật chồng giảm với điểm
+GOAL-008 theo MỘT luật duy nhất, không phụ thuộc thứ tự áp (tổng giảm =
+min(C + P, `total`)); đổi điểm trên đơn đã có mã bị cắt ở
+`total − promo_discount`. Hủy đơn có mã thì hoàn lượt dùng trong cùng
+transaction (usage `used` → `released`, `promo_discount` về 0,
+`promotion_id` về NULL, kèm audit riêng
+`promotion-usage-released`); trả hàng/hoàn tiền KHÔNG hoàn lượt dùng.
+Đối soát trừ cả điểm lẫn mã (`outstanding` = `order_total` −
+`points_discount` − `promo_discount` − `paid_total`,
+`payment_status` giữ nguyên logic D22); tích điểm tính trên tổng gốc,
+KHÔNG trừ mã. Lịch sử dùng mã append-only (`promotion_usages`). Không
+có endpoint gỡ mã khỏi đơn (muốn đổi mã thì hủy đơn rồi tạo đơn mới);
+không lưu thông tin thẻ. Idempotency (`promotion:create:<key>` /
+`promotion:apply:<key>`, gửi lại trả `replayed: true`) + chống race
+trong transaction `BEGIN IMMEDIATE`; RBAC khuyến mãi theo ma trận
+(tạo/sửa/khóa: chỉ owner/manager; áp mã: owner/manager toàn org, sales
+chỉ đơn thuộc chi nhánh mình; xem: owner/manager/accountant toàn org,
+sales chỉ mã mọi chi nhánh hoặc đúng chi nhánh mình, warehouse 403).
+Xem `docs/RBAC.md` (ma trận khuyến mãi) và `docs/DECISIONS.md` (D27).
+Endpoint chính: `POST/PATCH/GET /api/promotions`,
+`GET /api/promotions/:id` (kèm `used_count`, `usage_limit`,
+`per_customer_limit`), `POST /api/orders/:id/promotion`.
+
 ## Stack
 
 TypeScript + Node 24 + Express + SQLite (`node:sqlite`) + EJS server-rendered,

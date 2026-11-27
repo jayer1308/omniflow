@@ -376,6 +376,32 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       if (actor.role !== 'sales') return false;
       return inScope(actor.branchId, targetBranch);
     }
+    // GOAL-009: ma trận khuyến mãi (docs/RBAC.md, D27). Tạo/sửa/khóa mã:
+    // chỉ owner/manager. Áp mã: owner/manager toàn org, sales chỉ đơn
+    // thuộc chi nhánh mình. Xem mã: owner/manager/accountant toàn org,
+    // sales chỉ mã branch_id NULL (mọi chi nhánh) hoặc đúng chi nhánh
+    // mình, warehouse 403.
+    case 'create-promotion':
+    case 'update-promotion': {
+      return actor.role === 'owner' || actor.role === 'manager';
+    }
+    case 'apply-promotion': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'view-promotions': {
+      if (
+        actor.role === 'owner' ||
+        actor.role === 'manager' ||
+        actor.role === 'accountant'
+      ) {
+        return true;
+      }
+      if (actor.role !== 'sales') return false;
+      if (targetBranch === null) return true;
+      return inScope(actor.branchId, targetBranch);
+    }
     default:
       return false;
   }

@@ -1033,6 +1033,167 @@ crm_rbac() {
 }
 demo_step "khach/CRM: warehouse tao khach 403, sales hop nhat/xoa 403, warehouse xuat 403, sales xem khach chua gan 403" crm_rbac
 
+# Khuyen mai (GOAL-009): tao ma 10% cap 20000 -> trung ma 409 -> tao ma
+# fixed 50000 -> tao don 250000 -> ap ma 10% (giam 20000 do cap) -> ap
+# lai 400 -> ap ma het han 400 -> ap ma sai kenh 400 -> doi diem tru tien
+# don da co ma (tong giam = ma + diem, khong vuot tong) -> xac nhan -> xu
+# ly -> hoan tat -> thu tien (outstanding = tong - diem - ma - da tra) ->
+# huy don co ma khac (usage released, dung lai duoc) -> idempotency gui
+# lai khong ghi usage moi -> RBAC 403 (warehouse tao ma, sales ap ma
+# ngoai chi nhanh, warehouse xem ma).
+PROMO_FILE="$TMPDIR_DEMO/promo.txt"
+PROMO_ORDER_FILE="$TMPDIR_DEMO/promo-order.txt"
+SALES2_COOKIE="$TMPDIR_DEMO/sales2-cookie.txt"
+
+promo_tao_ma_va_ap() {
+  local res id code wha v1 v2 ord apply
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"km10","type":"percent","value":10,"cap":20000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  echo "$res" | grep -q '"code":"KM10"' || { echo "tao ma tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"cap":20000' || { echo "tao ma thieu cap: $res"; return 1; }
+  id="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).promotion.id))")"
+  echo "$id" > "$PROMO_FILE"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":" KM10 ","type":"percent","value":20}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  [ "$code" = "409" ] || { echo "trung ma tra ve HTTP $code, mong 409"; return 1; }
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMFIX50","type":"fixed","value":50000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  echo "$res" | grep -q '"type":"fixed"' || { echo "tao ma fixed tra ve: $res"; return 1; }
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$(cat "$CRM_FILE"),\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$res" | grep -q '"total":250000' || { echo "total don KM sai: $res"; return 1; }
+  ord="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  echo "$ord" > "$PROMO_ORDER_FILE"
+  apply="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/promotion")"
+  echo "$apply" | grep -q '"promo_discount":20000' || { echo "ap ma sai giam (mong 20000): $apply"; return 1; }
+  echo "$apply" | grep -q '"code":"KM10"' || { echo "ap ma thieu promotion: $apply"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMFIX50"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma lan 2 tra ve HTTP $code, mong 400"; return 1; }
+}
+demo_step "khuyen mai: tao ma 10% cap 20000 (code chuan hoa UPPERCASE), trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400" promo_tao_ma_va_ap
+
+promo_dieu_kien_sai() {
+  local wha v1 ord code
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMEXP","type":"percent","value":10,"valid_from":"2019-01-01T00:00:00.000Z","valid_to":"2020-01-01T00:00:00.000Z"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions" >/dev/null || return 1
+  ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMEXP"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma het han tra ve HTTP $code, mong 400"; return 1; }
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWEB","type":"percent","value":10,"channels":["web"]}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions" >/dev/null || return 1
+  ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWEB"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma sai kenh tra ve HTTP $code, mong 400"; return 1; }
+}
+demo_step "khuyen mai: ap ma het han 400, ap ma sai kenh 400" promo_dieu_kien_sai
+
+promo_chong_giam_va_thu_tien() {
+  local id ord res sum
+  id="$(cat "$CRM_FILE")"
+  ord="$(cat "$PROMO_ORDER_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord,\"points\":10}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/redeem")"
+  echo "$res" | grep -q '"discount":1000' || { echo "doi diem tren don co ma sai: $res"; return 1; }
+  echo "$res" | grep -q '"points_balance":35' || { echo "so du sau doi sai: $res"; return 1; }
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/payments" | grep -q '"status":"paid"' || return 1
+  sum="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/payments")"
+  echo "$sum" | grep -q '"outstanding":129000' || { echo "outstanding sau ma + diem sai: $sum"; return 1; }
+  echo "$sum" | grep -q '"payment_status":"partially_paid"' || { echo "payment_status sai: $sum"; return 1; }
+}
+demo_step "khuyen mai: doi 10 diem tren don da co ma tru 1000d, hoan tat, thu 100000 -> outstanding 129000 partially_paid" promo_chong_giam_va_thu_tien
+
+promo_huy_don_va_idempotency() {
+  local wha v1 can_id can_ord cancel idem_ord idem_a idem_b promo_id
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  promo_id="$(cat "$PROMO_FILE")"
+  can_id="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMCAN","type":"percent","value":10}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).promotion.id))")"
+  can_ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"code":"KMCAN"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$can_ord/promotion" | grep -q '"promo_discount":10000' || return 1
+  cancel="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$can_ord/cancel")"
+  echo "$cancel" | grep -q '"status":"cancelled"' || { echo "huy don tra ve: $cancel"; return 1; }
+  curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/promotions/$can_id" | grep -q '"used_count":0' || { echo "huy don khong hoan luot dung"; return 1; }
+  can_ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"code":"KMCAN"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$can_ord/promotion" | grep -q '"promo_discount":10000' || return 1
+  idem_ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  idem_a="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-promo-apply-1' -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$idem_ord/promotion")"
+  echo "$idem_a" | grep -q '"promo_discount":10000' || { echo "ap ma idem lan 1 sai: $idem_a"; return 1; }
+  idem_b="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-promo-apply-1' -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$idem_ord/promotion")"
+  echo "$idem_b" | grep -q '"replayed":true' || { echo "gui lai ap ma khong replay: $idem_b"; return 1; }
+  curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/promotions/$promo_id" | grep -q '"used_count":2' || { echo "used_count sau gui lai sai (mong 2)"; return 1; }
+}
+demo_step "khuyen mai: huy don hoan luot dung (used_count 0, ap lai duoc), gui lai ap ma replayed + used_count 2" promo_huy_don_va_idempotency
+
+promo_rbac() {
+  local code branch2 pass
+  branch2="$(cat "$BRANCH2_FILE")"
+  pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales2-demo@example.local\",\"password\":\"$pass\",\"role\":\"sales\",\"branch_id\":$branch2}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite" >/dev/null || return 1
+  curl -fsS -c "$SALES2_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales2-demo@example.local\",\"password\":\"$pass\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" >/dev/null || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWH","type":"percent","value":10}' \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  [ "$code" = "403" ] || { echo "warehouse tao ma tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$SALES2_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$(cat "$PROMO_ORDER_FILE")/promotion")"
+  [ "$code" = "403" ] || { echo "sales ap ma ngoai chi nhanh tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  [ "$code" = "403" ] || { echo "warehouse xem ma tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "khuyen mai: warehouse tao ma 403, sales ap ma ngoai chi nhanh 403, warehouse xem ma 403" promo_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -1060,7 +1221,8 @@ docs_present() {
   [ -f docs/ROADMAP.md ] && [ -f docs/DECISIONS.md ] && [ -f docs/SETUP.md ] \
     && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md \
     && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md \
-    && grep -q 'D26' docs/DECISIONS.md && grep -q 'create-customer' docs/RBAC.md
+    && grep -q 'D26' docs/DECISIONS.md && grep -q 'D27' docs/DECISIONS.md \
+    && grep -q 'create-customer' docs/RBAC.md && grep -q 'create-promotion' docs/RBAC.md
 }
 demo_step "docs ROADMAP/DECISIONS/SETUP co mat" docs_present
 

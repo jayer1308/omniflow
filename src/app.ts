@@ -32,6 +32,13 @@ import {
   transitionOrderTx,
   type OrderAction,
 } from './orders.js';
+import {
+  applyPromotionTx,
+  createPromotionTx,
+  getPromotionDetail,
+  listPromotions,
+  updatePromotionTx,
+} from './promotions.js';
 import { isAllowedChannel, parseProductCsvWithLines, resolveEffectivePrice } from './products.js';
 import { can, ROLES, type Role } from './rbac.js';
 import {
@@ -4737,28 +4744,147 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
-  // ---------- Khuyen mai (GOAL-009) — STUB cua Tester ----------
-  // Worker implement that 5 endpoint + migration 014; stub tra 501 de
-  // test khoa do dung ly do (thieu tinh nang), khong phai loi setup.
-  function promoNotImplemented(res: Response): void {
-    res.status(501).json({ error: 'not implemented: khuyen mai chua co' });
+  // ---------- Khuyen mai (GOAL-009, D27) ----------
+  // Tao ma + ap ma qua withStockIdempotency (ten mien
+  // promotion:create:<key> / promotion:apply:<key>): kiem tra key + thuc
+  // thi + ghi key trong CUNG MOT transaction BEGIN IMMEDIATE. Gui lai tra
+  // response cu kem replayed: true. Sua/xem ma khong dung idempotency.
+  // Khong co endpoint go ma khoi don (muon doi ma thi huy don roi tao don
+  // moi) va khong co API DELETE usage (append-only) — goi cac route do
+  // tra 404 mac dinh cua Express.
+
+  /** Map loi nghiep vu khuyen mai (xem src/promotions.ts) sang HTTP. */
+  function promoFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('conflict')) {
+      res.status(409).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý khuyến mãi' });
   }
 
-  app.post('/api/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
-    promoNotImplemented(res);
-  });
-  app.patch('/api/promotions/:id', requireAuth, (_req: TenantRequest, res: Response) => {
-    promoNotImplemented(res);
-  });
-  app.get('/api/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
-    promoNotImplemented(res);
-  });
-  app.get('/api/promotions/:id', requireAuth, (_req: TenantRequest, res: Response) => {
-    promoNotImplemented(res);
-  });
-  app.post('/api/orders/:id/promotion', requireAuth, (_req: TenantRequest, res: Response) => {
-    promoNotImplemented(res);
-  });
+  /** Key idempotency cho khuyen mai, tu header hoac body (thieu key van chay). */
+  function promoKey(req: TenantRequest, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = (req.body ?? {}) as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `promotion:${op}:${raw}`;
+  }
+
+  function parsePromoId(req: TenantRequest, res: Response): number | null {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return null;
+    }
+    return id;
+  }
+
+  app.post(
+    '/api/promotions',
+    requireAuth,
+    requireRole('owner', 'manager'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      try {
+        const outcome = runStockOp(actor, promoKey(req, 'create'), () =>
+          createPromotionTx(db, actor, (req.body ?? {}) as Record<string, unknown>),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        promoFail(res, err);
+      }
+    },
+  );
+
+  app.patch(
+    '/api/promotions/:id',
+    requireAuth,
+    requireRole('owner', 'manager'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parsePromoId(req, res);
+      if (id === null) return;
+      try {
+        const result = runStockTransaction(db, () =>
+          updatePromotionTx(db, actor, id, (req.body ?? {}) as Record<string, unknown>),
+        );
+        res.json(result);
+      } catch (err) {
+        promoFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/promotions',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      try {
+        res.json(listPromotions(db, actor, req.query as Record<string, unknown>));
+      } catch (err) {
+        promoFail(res, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/promotions/:id',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales', 'accountant'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const id = parsePromoId(req, res);
+      if (id === null) return;
+      try {
+        res.json(getPromotionDetail(db, actor, id));
+      } catch (err) {
+        promoFail(res, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/orders/:id/promotion',
+    requireAuth,
+    requireRole('owner', 'manager', 'sales'),
+    (req: TenantRequest, res: Response) => {
+      const actor = req.user as SessionUser;
+      const orderId = Number(req.params.id);
+      if (!Number.isInteger(orderId)) {
+        res.status(400).json({ error: 'id không hợp lệ' });
+        return;
+      }
+      try {
+        const outcome = runStockOp(actor, promoKey(req, 'apply'), () =>
+          applyPromotionTx(db, actor, orderId, (req.body ?? {}) as { code?: unknown }),
+        );
+        if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+        else res.status(201).json(outcome.result);
+      } catch (err) {
+        promoFail(res, err);
+      }
+    },
+  );
 
   return app;
 }

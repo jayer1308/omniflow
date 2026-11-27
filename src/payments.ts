@@ -97,15 +97,17 @@ export function computePaymentSummary(
   db: DatabaseSync,
   orderId: number,
 ): OrderPaymentSummary {
-  const order = db.prepare('SELECT total, points_discount FROM orders WHERE id = ?').get(orderId) as
-    | { total: number; points_discount: number }
+  const order = db.prepare('SELECT total, points_discount, promo_discount FROM orders WHERE id = ?').get(orderId) as
+    | { total: number; points_discount: number; promo_discount: number }
     | undefined;
   if (!order) throw new Error('not_found: không tìm thấy đơn hàng');
   const orderTotal = order.total;
   // GOAL-008 (D26): outstanding trừ thêm points_discount (điểm đã đổi);
+  // GOAL-009 (D27): outstanding trừ thêm promo_discount (mã đã áp);
   // payment_status GIỮ NGUYÊN logic D22 trên (paid_total, refunded_total,
-  // order_total) — đơn đổi điểm hết tổng mà chưa trả đồng nào vẫn 'unpaid'.
+  // order_total) — đơn đổi điểm/mã hết tổng mà chưa trả đồng nào vẫn 'unpaid'.
   const pointsDiscount = order.points_discount ?? 0;
+  const promoDiscount = order.promo_discount ?? 0;
   const paidRow = db
     .prepare(
       `SELECT COALESCE(SUM(amount), 0) AS s FROM payments
@@ -121,7 +123,7 @@ export function computePaymentSummary(
     .get(orderId) as { s: number };
   const refundedTotal = refundedRow.s;
   const paidTotal = paidRow.s - refundedTotal;
-  const outstanding = orderTotal - pointsDiscount - paidTotal;
+  const outstanding = orderTotal - pointsDiscount - promoDiscount - paidTotal;
   const hasRefundedReturn = (
     db
       .prepare(

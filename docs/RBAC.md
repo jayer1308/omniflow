@@ -328,6 +328,49 @@ GOAL-002. `customer_points`/`customer_notes` là lịch sử chi tiết
 `customer:note-create:<key>` cho ghi chú); gửi lại trả đúng response cũ
 kèm `replayed: true`.
 
+### Ma trận quyền khuyến mãi (GOAL-009, D27)
+
+Mã giảm giá là dữ liệu cấp org; phạm vi gate bằng `branch_id` của mã
+(`NULL` = mọi chi nhánh) khi xem, và bằng `branch_id` của đơn khi áp mã.
+Helper `can()` mở rộng 4 actions: `create-promotion`,
+`update-promotion`, `apply-promotion`, `view-promotions`. Mọi endpoint
+khuyến mãi qua `requireRole` + `can()`.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Tạo mã (`POST /api/promotions`) | Được | Được | Không (403) | Không (403) | Không (403) |
+| Sửa/khóa/mở mã (`PATCH /api/promotions/:id`) | Được | Được | Không (403) | Không (403) | Không (403) |
+| Áp mã (`POST /api/orders/:id/promotion`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh mình | Không (403) | Không (403) |
+| Xem mã (`GET /api/promotions`, `GET /api/promotions/:id`) | Được, toàn org | Được, toàn org | Được, chỉ mã `branch_id` NULL (mọi chi nhánh) hoặc đúng chi nhánh mình | Không (403) | Được, toàn org |
+
+Ghi chú: `sales` xem mã giới hạn chi nhánh khác → 403; `sales` áp mã cho
+đơn ngoài chi nhánh → 403; mọi vai xem/áp mã ngoài org → 403. Lọc danh
+sách theo `branch_id` khớp chính xác: mã `branch_id` NULL không xuất
+hiện khi lọc theo một chi nhánh cụ thể.
+
+### Endpoints mới (GOAL-009)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/promotions` | owner / manager; sales / warehouse / accountant → 403 |
+| `PATCH /api/promotions/:id` | owner / manager; sales / warehouse / accountant → 403 |
+| `GET /api/promotions`, `GET /api/promotions/:id` | owner / manager / accountant toàn org, sales chỉ mã `branch_id` NULL hoặc đúng chi nhánh mình; warehouse → 403 |
+| `POST /api/orders/:id/promotion` | owner / manager toàn org, sales chỉ đơn thuộc chi nhánh mình; warehouse / accountant → 403 |
+
+Audit log: mọi thao tác tạo/sửa/khóa mã, áp mã, hoàn lượt dùng khi hủy
+đơn đều ghi `audit_log` (`action` `create-promotion` /
+`update-promotion` / `apply-promotion` / `promotion-usage-released`,
+`detail` JSON với `target_promotion_id`, `promotion_code`,
+`target_order_id`/`order_code` khi áp mã hoặc hoàn lượt, `discount` khi
+áp mã, KHÔNG chứa thông tin thẻ). Xem log theo luật GOAL-002.
+`promotion_usages` là lịch sử dùng mã chi tiết (append-only),
+`audit_log` là lớp ghi nhận thao tác nhạy cảm — cả hai đều phải có,
+không thay nhau. Không có API sửa/xóa usage (gọi → 404); không có
+endpoint gỡ mã khỏi đơn (muốn đổi mã thì hủy đơn rồi tạo đơn mới).
+Idempotency: header `Idempotency-Key` hoặc `idempotency_key` trong body;
+tên miền key `promotion:create:<key>` / `promotion:apply:<key>`; gửi lại
+trả đúng response cũ kèm `replayed: true`, không tạo mã/usage mới.
+
 ### Endpoints mới (GOAL-005)
 
 | Endpoint | Vai trò |

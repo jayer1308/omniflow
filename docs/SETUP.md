@@ -229,6 +229,62 @@ trong body, tên miền `customer:points-earn:<key>` /
 quyết định mô hình: `docs/DECISIONS.md` (D26). KHÔNG lưu thông tin thẻ;
 không thêm màn hình khách/CRM (GOAL-012).
 
+## Khuyến mãi (GOAL-009)
+
+Mã giảm giá cấp org (`promotions`, migration 014): `code` chuẩn hóa
+UPPERCASE + trim, duy nhất trong org (trùng → 409); loại `percent`
+(`value` nguyên 1..100, `cap` nguyên > 0, chỉ percent) hoặc `fixed`
+(`value` nguyên > 0); điều kiện áp: `min_order_total` (mặc định 0),
+`channels` JSON (NULL = mọi kênh), `branch_id` (NULL = mọi chi nhánh),
+`valid_from`/`valid_to` ISO 8601 (NULL = không giới hạn),
+`usage_limit`/`per_customer_limit` (NULL = không giới hạn);
+`status` `active`/`locked`. Tạo mã (`POST /api/promotions`,
+`{code, type, value, cap?, min_order_total?, channels?, branch_id?,
+valid_from?, valid_to?, usage_limit?, per_customer_limit?}`) → 201,
+trả mã đã tạo; trùng mã → 409, sai validate → 400, `branch_id` không
+tồn tại → 404, ngoài org → 403. Sửa/khóa mã
+(`PATCH /api/promotions/:id`, nhận `value?`, `cap?`,
+`min_order_total?`, `channels?`, `branch_id?`, `valid_from?`,
+`valid_to?`, `usage_limit?`, `per_customer_limit?`, `status?`) → 200;
+gửi `code` → 400 (mã không đổi sau khi tạo); `status` chỉ
+`active`/`locked`; mã không tồn tại → 404, ngoài org → 403. Xem mã
+(`GET /api/promotions`, lọc `name`/`code` (chuỗi con), `status`,
+`channel`, `branch_id` khớp chính xác — mã `branch_id` NULL không xuất
+hiện khi lọc theo một chi nhánh cụ thể; `limit` mặc định 20 tối đa 100,
+`offset` mặc định 0, kèm `total`, mới nhất trước;
+`GET /api/promotions/:id` kèm `{used_count, usage_limit,
+per_customer_limit}`, `used_count` = số usage status `used`).
+Áp mã (`POST /api/orders/:id/promotion`, `{code, idempotency_key?}`)
+→ 201: chỉ đơn `draft`, một đơn một mã, mã phải `active`, đúng kênh/
+chi nhánh, trong thời gian hiệu lực, tổng đơn ≥ `min_order_total`,
+còn lượt tổng + lượt mỗi khách; sai điều kiện → 400, mã không tồn tại
+trong org → 404, đơn không tồn tại → 404, ngoài org → 403. Số tiền
+giảm tính trên tổng đơn gốc bằng hàm thuần `calculateDiscount`
+(percent → `floor(total × value / 100)` rồi min với `cap` và phần còn
+lại sau điểm; fixed → `min(value, total − points_discount)`), ghi vào
+`orders.promo_discount` (cột riêng, `orders.total` snapshot gốc KHÔNG
+đổi); trả đơn kèm `{promotion: {id, code, type, value},
+promo_discount}`. Luật chồng giảm với điểm GOAL-008 theo MỘT luật duy
+nhất: tổng giảm cuối = `min(C + P, total)` (C = số giảm của mã trước
+khi cắt ở phần còn lại, P = điểm đổi × 100), không phụ thuộc thứ tự áp;
+đổi điểm trên đơn đã có mã bị cắt ở `total − promo_discount`. Hủy đơn
+có mã thì hoàn lượt dùng trong cùng transaction (usage `used` →
+`released`, `released_at` + `release_reason` = mã đơn đã hủy,
+`promo_discount` về 0, `promotion_id` về NULL, kèm audit riêng
+`promotion-usage-released`); trả hàng/hoàn tiền KHÔNG hoàn lượt dùng.
+Đối soát (`GET /api/orders/:id/payments`): `outstanding` =
+`order_total` − `points_discount` − `promo_discount` − `paid_total`,
+`payment_status` giữ nguyên logic D22; tích điểm tính trên tổng gốc,
+KHÔNG trừ mã. Lịch sử dùng mã (`promotion_usages`) append-only: chỉ
+INSERT + chuyển `used` → `released` khi hủy đơn, không có API DELETE
+usage; không có endpoint gỡ mã khỏi đơn (muốn đổi mã thì hủy đơn rồi
+tạo đơn mới). Idempotency: header `Idempotency-Key` hoặc
+`idempotency_key` trong body, tên miền `promotion:create:<key>` /
+`promotion:apply:<key>`, gửi lại trả `replayed: true`. Ma trận quyền
+khuyến mãi đầy đủ: `docs/RBAC.md`; quyết định mô hình:
+`docs/DECISIONS.md` (D27). KHÔNG lưu thông tin thẻ; không thêm màn hình
+khuyến mãi (GOAL-012).
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
@@ -275,7 +331,7 @@ Dừng server trước khi restore file DB đang chạy.
 
 - `src/server.ts` — điểm vào: mở DB, migration, seed nếu DB trống, chạy server
 - `src/app.ts` — Express app: routes, auth, scope đa tenant
-- `src/db.ts` — mở DB + migration tuần tự (11 migration, 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng, 011 là thanh toán/hoàn tiền/lịch sử giao dịch)
+- `src/db.ts` — mở DB + migration tuần tự (14 migration: 008 là sản phẩm/giá/CSV, 009 là kho/tồn, 010 là đơn hàng, 011 là thanh toán/hoàn tiền/lịch sử giao dịch, 012 là giao/trả, 013 là khách/CRM, 014 là khuyến mãi)
 - `src/orders.ts` — đơn hàng: state machine, mã đơn, service tạo/chuyển
   trạng thái (giữ/giải phóng/xuất kho qua `applyMovement`, idempotency
   trong transaction)

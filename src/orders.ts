@@ -60,6 +60,10 @@ export interface OrderRow {
   customer_id: number | null;
   /** GOAL-008: tiền đã trừ bằng điểm đổi (mặc định 0). */
   points_discount: number;
+  /** GOAL-009: mã giảm giá đang áp (NULL = chưa áp mã). */
+  promotion_id: number | null;
+  /** GOAL-009: tiền đã giảm bằng mã (mặc định 0). */
+  promo_discount: number;
   status: OrderStatus;
   total: number;
   created_by: number;
@@ -460,6 +464,46 @@ export function transitionOrderTx(
           reference: order.code,
         });
       }
+    }
+    // GOAL-009 (D27): hủy đơn có mã thì hoàn lượt dùng trong CÙNG transaction
+    // với đổi trạng thái: usage 'used' -> 'released' (released_at +
+    // release_reason = mã đơn đã hủy), orders.promo_discount về 0 và
+    // promotion_id về NULL, kèm 1 audit riêng 'promotion-usage-released'.
+    // Trả hàng/hoàn tiền KHÔNG động tới usage (xem src/payments.ts).
+    if (order.promotion_id !== null) {
+      const usage = db
+        .prepare(
+          "SELECT id, discount_amount FROM promotion_usages WHERE order_id = ? AND promotion_id = ? AND status = 'used'",
+        )
+        .get(orderId, order.promotion_id) as
+        | { id: number; discount_amount: number }
+        | undefined;
+      const promo = db
+        .prepare('SELECT code FROM promotions WHERE id = ?')
+        .get(order.promotion_id) as { code: string } | undefined;
+      if (usage) {
+        db.prepare(
+          "UPDATE promotion_usages SET status = 'released', released_at = ?, release_reason = ? WHERE id = ?",
+        ).run(nowIso, `đơn ${order.code} đã hủy`, usage.id);
+      }
+      db.prepare(
+        'UPDATE orders SET promotion_id = NULL, promo_discount = 0, updated_at = ? WHERE id = ?',
+      ).run(nowIso, orderId);
+      db.prepare(
+        'INSERT INTO audit_log (org_id, user_id, action, detail, created_at) VALUES (?, ?, ?, ?, ?)',
+      ).run(
+        actor.orgId,
+        actor.id,
+        'promotion-usage-released',
+        JSON.stringify({
+          target_promotion_id: order.promotion_id,
+          promotion_code: promo ? promo.code : null,
+          target_order_id: order.id,
+          order_code: order.code,
+          discount: usage ? usage.discount_amount : 0,
+        }),
+        nowIso,
+      );
     }
   } else if (action === 'complete') {
     for (const item of items) {

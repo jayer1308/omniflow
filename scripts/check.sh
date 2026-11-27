@@ -780,11 +780,143 @@ smoke() {
     "http://127.0.0.1:$port/api/customers" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/customers/$code2")"
   [ "$code" = "403" ] || { echo "sales xem khach chua gan tra ve HTTP $code, mong 403"; return 1; }
+  # Khuyen mai (GOAL-009): tao ma 10% cap 20000 -> trung ma 409 -> tao ma
+  # fixed 50000 -> tao don 250000 -> ap ma 10% (giam 20000 do cap) -> ap
+  # lai 400 -> ap ma het han 400 -> ap ma sai kenh 400 -> doi diem tru
+  # tien don da co ma (tong giam = ma + diem, khong vuot tong) -> xac nhan
+  # -> xu ly -> hoan tat -> thu tien (outstanding = tong - diem - ma -
+  # da tra) -> huy don co ma khac (usage released, dung lai duoc) ->
+  # idempotency gui lai khong ghi usage moi -> RBAC 403 (warehouse tao
+  # ma, sales ap ma ngoai chi nhanh, warehouse xem ma).
+  local promo_res promo_id promo_dup fixed_res ord250 ord250_id apply_res
+  local exp_res exp_ord web_res web_ord redeem2 pay2 can_res can_id
+  local can_ord cancel_res can2_ord idem_ord idem_ord_id idem_a idem_b
+  local sales_b2_pass sales_b2_res sales_b2_cookie
+  sales_b2_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  sales_b2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-b2-smoke@example.local\",\"password\":\"$sales_b2_pass\",\"role\":\"sales\",\"branch_id\":$branch2_id}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  sales_b2_cookie="$tmpdir/sales-b2-cookie.txt"
+  curl -fsS -c "$sales_b2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"sales-b2-smoke@example.local\",\"password\":\"$sales_b2_pass\"}" \
+    "http://127.0.0.1:$port/login" >/dev/null || return 1
+  promo_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"km10","type":"percent","value":10,"cap":20000}' \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  echo "$promo_res" | grep -q '"code":"KM10"' || { echo "tao ma tra ve: $promo_res"; return 1; }
+  echo "$promo_res" | grep -q '"cap":20000' || { echo "tao ma thieu cap: $promo_res"; return 1; }
+  promo_id="$(echo "$promo_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).promotion.id))")"
+  promo_dup="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":" KM10 ","type":"percent","value":20}' \
+    "http://127.0.0.1:$port/api/promotions")"
+  [ "$promo_dup" = "409" ] || { echo "trung ma tra ve HTTP $promo_dup, mong 409"; return 1; }
+  fixed_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMFIX50","type":"fixed","value":50000}' \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  echo "$fixed_res" | grep -q '"type":"fixed"' || { echo "tao ma fixed tra ve: $fixed_res"; return 1; }
+  ord250="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2},{\"variant_id\":$crm_p2v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$ord250" | grep -q '"total":250000' || { echo "total don KM sai: $ord250"; return 1; }
+  ord250_id="$(echo "$ord250" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  apply_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/promotion")" || return 1
+  echo "$apply_res" | grep -q '"promo_discount":20000' || { echo "ap ma sai giam (mong 20000): $apply_res"; return 1; }
+  echo "$apply_res" | grep -q '"code":"KM10"' || { echo "ap ma thieu promotion: $apply_res"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMFIX50"}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma lan 2 tra ve HTTP $code, mong 400"; return 1; }
+  exp_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMEXP","type":"percent","value":10,"valid_from":"2019-01-01T00:00:00.000Z","valid_to":"2020-01-01T00:00:00.000Z"}' \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  exp_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMEXP"}' \
+    "http://127.0.0.1:$port/api/orders/$exp_ord/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma het han tra ve HTTP $code, mong 400"; return 1; }
+  web_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWEB","type":"percent","value":10,"channels":["web"]}' \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  web_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWEB"}' \
+    "http://127.0.0.1:$port/api/orders/$web_ord/promotion")"
+  [ "$code" = "400" ] || { echo "ap ma sai kenh tra ve HTTP $code, mong 400"; return 1; }
+  # Doi diem tren don da co ma: khach con 45 diem, doi 10 diem -> tru 1000d
+  # (tong giam = 20000 ma + 1000 diem); thu 100000 -> outstanding 129000.
+  redeem2="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord250_id,\"points\":10}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/redeem")" || return 1
+  echo "$redeem2" | grep -q '"discount":1000' || { echo "doi diem tren don co ma sai: $redeem2"; return 1; }
+  echo "$redeem2" | grep -q '"points_balance":35' || { echo "so du sau doi sai: $redeem2"; return 1; }
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$port/api/orders/$ord250_id/payments" | grep -q '"status":"paid"' || return 1
+  pay2="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/orders/$ord250_id/payments")" || return 1
+  echo "$pay2" | grep -q '"outstanding":129000' || { echo "outstanding sau ma + diem sai: $pay2"; return 1; }
+  echo "$pay2" | grep -q '"payment_status":"partially_paid"' || { echo "payment_status sai: $pay2"; return 1; }
+  # Huy don co ma khac: usage released (used_count ve 0), ap lai duoc.
+  can_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMCAN","type":"percent","value":10}' \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  can_id="$(echo "$can_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).promotion.id))")"
+  can_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{"code":"KMCAN"}' \
+    "http://127.0.0.1:$port/api/orders/$can_ord/promotion" | grep -q '"promo_discount":10000' || return 1
+  cancel_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$can_ord/cancel")" || return 1
+  echo "$cancel_res" | grep -q '"status":"cancelled"' || { echo "huy don tra ve: $cancel_res"; return 1; }
+  echo "$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/promotions/$can_id")" | grep -q '"used_count":0' || { echo "huy don khong hoan luot dung"; return 1; }
+  can2_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{"code":"KMCAN"}' \
+    "http://127.0.0.1:$port/api/orders/$can2_ord/promotion" | grep -q '"promo_discount":10000' || return 1
+  # Idempotency ap ma: gui lai cung key -> replayed, used_count khong doi (2).
+  idem_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  idem_ord_id="$(echo "$idem_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  idem_a="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-promo-apply-1' -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/promotion")" || return 1
+  echo "$idem_a" | grep -q '"promo_discount":10000' || { echo "ap ma idem lan 1 sai: $idem_a"; return 1; }
+  idem_b="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-promo-apply-1' -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/promotion")" || return 1
+  echo "$idem_b" | grep -q '"replayed":true' || { echo "gui lai ap ma khong replay: $idem_b"; return 1; }
+  echo "$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/promotions/$promo_id")" | grep -q '"used_count":2' || { echo "used_count sau gui lai sai (mong 2)"; return 1; }
+  # RBAC khuyen mai: warehouse tao ma 403, sales chi nhanh 2 ap ma cho don
+  # chi nhanh 1 403, warehouse xem ma 403.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KMWH","type":"percent","value":10}' \
+    "http://127.0.0.1:$port/api/promotions")"
+  [ "$code" = "403" ] || { echo "warehouse tao ma tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales_b2_cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"KM10"}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/promotion")"
+  [ "$code" = "403" ] || { echo "sales ap ma ngoai chi nhanh tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" "http://127.0.0.1:$port/api/promotions")"
+  [ "$code" = "403" ] || { echo "warehouse xem ma tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404) + khuyen mai (tao ma 10% cap 20000, trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400, ap ma het han 400, ap ma sai kenh 400, doi diem tren don co ma + thu tien outstanding 129000, huy don hoan luot dung + ap lai duoc, idempotency gui lai replayed + used_count 2, RBAC 403 warehouse tao ma / sales ap ma ngoai chi nhanh / warehouse xem ma)"
 }
 step "smoke server" smoke
 
