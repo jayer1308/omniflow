@@ -1,0 +1,79 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/customers-crm-acceptance.test.ts::AC-1 migration 013 tao du 3 bang khach/diem/ghi chu + cot orders, khong co cot segment/expires_at",
+      "tests/customers-crm-acceptance.test.ts::AC-1 POST /api/customers 201 kem purchase_summary rong + points_balance 0 + segment new",
+      "tests/customers-crm-acceptance.test.ts::AC-1 tao khach sai dau vao: thieu name 400, trung phone 409, branch la 404/403, sales sai chi nhanh 403",
+      "tests/customers-crm-acceptance.test.ts::AC-1 PATCH /api/customers/:id 200, name trong 400, doi phone trung 409, khach merged 400",
+      "tests/customers-crm-acceptance.test.ts::AC-1 GET /api/customers/:id tra purchase_summary chi tinh don completed, don draft khong tinh",
+      "tests/customers-crm-acceptance.test.ts::AC-1 GET /api/customers/:id/orders tra don cua khach moi nhat truoc kem items, phan trang limit/offset",
+      "tests/customers-crm-acceptance.test.ts::AC-1 POST /api/orders nhan customer_id optional: gan khach 201, khong gui van tao duoc, sai khach 404/403/400",
+      "tests/customers-crm-acceptance.test.ts::AC-1 doc khach ngoai org 403, khach khong ton tai 404"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/customers-crm-acceptance.test.ts::AC-2 tich diem don completed 250000d -> 25 diem, 1 dong ledger earn reason la ma don",
+      "tests/customers-crm-acceptance.test.ts::AC-2 tich diem don chua completed -> 400, khong ghi ledger, so du khong doi",
+      "tests/customers-crm-acceptance.test.ts::AC-2 tich diem lan 2 cung don khac key -> 400, so du khong doi",
+      "tests/customers-crm-acceptance.test.ts::AC-2 tich diem tinh tren tong sau hoan: don 250000d hoan 60000d -> 19 diem",
+      "tests/customers-crm-acceptance.test.ts::AC-2 don tong sau hoan < 10000d -> 400, khong ghi ledger 0 diem",
+      "tests/customers-crm-acceptance.test.ts::AC-2 doi diem 10 diem tru 1000d don draft, outstanding giam, payment_status van unpaid",
+      "tests/customers-crm-acceptance.test.ts::AC-2 doi diem sai: vuot so du 400, points khong nguyen/<=0 400, don khong draft 400, don khong thuoc khach 400",
+      "tests/customers-crm-acceptance.test.ts::AC-2 doi diem lan 2 cung don -> 400, so du + points_discount khong doi",
+      "tests/customers-crm-acceptance.test.ts::AC-2 doi diem vuot tong don: 100 diem cho don 5000d thi discount = 5000d, so diem tru van 100",
+      "tests/customers-crm-acceptance.test.ts::AC-2 idempotency tich/doi diem: gui lai cung key -> replayed true, khong cong/tru lan 2",
+      "tests/customers-crm-acceptance.test.ts::AC-2 tich/doi diem dong thoi 2 lan cung don: chi 1 lan thanh cong, so du dung",
+      "tests/customers-crm-acceptance.test.ts::AC-2 GET /api/customers/:id/points tra balance + ledger moi nhat truoc"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/customers-crm-acceptance.test.ts::AC-3 POST /api/customers/:id/notes 201 author la nguoi thuc hien, GET moi nhat truoc + phan trang",
+      "tests/customers-crm-acceptance.test.ts::AC-3 ghi chu content trong 400, ghi chu cho khach merged 400",
+      "tests/customers-crm-acceptance.test.ts::AC-3 khong co API sua/xoa ghi chu hay ledger: goi sua/xoa -> 404 hoac 405",
+      "tests/customers-crm-acceptance.test.ts::AC-3 segment new: khach chua co don va khach 2 don gan day deu new",
+      "tests/customers-crm-acceptance.test.ts::AC-3 segment frequent: khach 3 don completed gan day",
+      "tests/customers-crm-acceptance.test.ts::AC-3 segment vip: tong chi >= 5000000d hoac >= 10 don completed",
+      "tests/customers-crm-acceptance.test.ts::AC-3 thu tu uu tien segment: VIP 100 ngay van VIP, 5 don lan mua cuoi 100 ngay -> dormant",
+      "tests/customers-crm-acceptance.test.ts::AC-3 tim/loc khach theo ten/dien thoai/pham vi segment, segment la -> 400",
+      "tests/customers-crm-acceptance.test.ts::AC-3 loc theo branch_id + phan trang limit/offset + total, sales khong thay khach chua gan chi nhanh"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/customers-crm-acceptance.test.ts::AC-4 hop nhat thieu/false confirm -> 400, khong lam gi",
+      "tests/customers-crm-acceptance.test.ts::AC-4 hop nhat co confirm: diem/lich su cong don, nguon merged + phone/email NULL, ghi chu ca 2 con",
+      "tests/customers-crm-acceptance.test.ts::AC-4 hop nhat voi chinh minh 400, hop nhat khach da merged 400",
+      "tests/customers-crm-acceptance.test.ts::AC-4 khach merged: khong tao don/tich/doi diem/ghi chu duoc, moi thao tac -> 400",
+      "tests/customers-crm-acceptance.test.ts::AC-4 GET /api/customers/:id/export tra du 4 phan + audit log; export khach merged tra rong kem merged_into_id",
+      "tests/customers-crm-acceptance.test.ts::AC-4 audit detail cua MOI thao tac khach KHONG chua phone/email/address",
+      "tests/customers-crm-acceptance.test.ts::AC-4 DELETE khach chua co don 200 + GET lai 404; khach co don 400; khach merged 400",
+      "tests/customers-crm-acceptance.test.ts::AC-4 idempotency hop nhat: gui lai cung key -> replayed true, khong chuyen lan 2; hop nhat dong thoi chi 1 lan"
+    ]
+  },
+  {
+    "acceptanceId": "AC-5",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/customers-crm-acceptance.test.ts::AC-5 can() 9 actions khach/CRM theo dung ma tran brief",
+      "tests/customers-crm-acceptance.test.ts::AC-5 RBAC 403 qua HTTP theo tung o cam trong ma tran khach/CRM",
+      "tests/customers-crm-acceptance.test.ts::AC-5 RBAC duong: sales dung chi nhanh tao/tich/ghi chu 201, warehouse xem 200, accountant xuat 200",
+      "tests/customers-crm-acceptance.test.ts::AC-5 audit log ghi MOI thao tac khach/CRM voi user_id + created_at + detail, sales xem log 403",
+      "tests/customers-crm-acceptance.test.ts::AC-5 lich su diem/ghi chu: tao -> tich -> doi -> ghi chu -> hop nhat, dung thu tu, khong dong thua khi gui lap"
+    ]
+  }
+]

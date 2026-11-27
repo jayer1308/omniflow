@@ -4429,5 +4429,32 @@ export function createApp(db: DatabaseSync): Express {
     }
   });
 
+  // ---------- Khach hang + CRM (GOAL-008) — STUB cho Tester ----------
+  // Worker thay bang logic that: hien tai moi endpoint khach tra 501
+  // "not implemented" de test acceptance DO dung ly do. Route sua/xoa
+  // ghi chu/ledger cung la stub 501 (khong phai 404/405) de test "khong
+  // co endpoint" DO tren stub va xanh khi Worker bo route di (Express
+  // tra 404 mac dinh).
+  const customerNotImplemented = (_req: TenantRequest, res: Response): void => {
+    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
+  };
+  app.post('/api/customers', customerNotImplemented);
+  app.patch('/api/customers/:id', customerNotImplemented);
+  app.get('/api/customers', customerNotImplemented);
+  app.get('/api/customers/:id', customerNotImplemented);
+  app.get('/api/customers/:id/orders', customerNotImplemented);
+  app.post('/api/customers/:id/points/earn', customerNotImplemented);
+  app.post('/api/customers/:id/points/redeem', customerNotImplemented);
+  app.get('/api/customers/:id/points', customerNotImplemented);
+  app.post('/api/customers/:id/notes', customerNotImplemented);
+  app.get('/api/customers/:id/notes', customerNotImplemented);
+  app.post('/api/customers/:id/merge', customerNotImplemented);
+  app.get('/api/customers/:id/export', customerNotImplemented);
+  app.delete('/api/customers/:id', customerNotImplemented);
+  app.patch('/api/customers/:id/notes/:noteId', customerNotImplemented);
+  app.delete('/api/customers/:id/notes/:noteId', customerNotImplemented);
+  app.patch('/api/customers/:id/points/:pointId', customerNotImplemented);
+  app.delete('/api/customers/:id/points/:pointId', customerNotImplemented);
+
   return app;
 }
