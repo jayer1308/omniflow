@@ -1,16 +1,16 @@
-# GOAL-010 v1: OmniFlow co bao cao + doi soat tren du lieu that da co: bao cao doanh thu theo kenh/chi nhanh/san pham/danh muc/thoi gian (mac dinh thang hien tai, chi tinh don completed, thoi gian theo thoi diem hoan tat tu order_events, hien thi Asia/Ho_Chi_Minh); bao cao ton kho + bien dong + canh bao ton thap; doi soat 3 mat kho–don–thanh toan (le th liet ke tung dong kem so ky vong vs thuc te, du lieu mau da biet cho 0 dong error); bao cao khuyen mai da dung + diem da doi; xuat CSV cho moi bao cao (so lieu khop API JSON); phan quyen xem bao cao theo vai + scope chi nhanh/kho (accountant toan org, sales chi chi nhanh minh, warehouse chi bao cao ton theo kho duoc gan); audit log cho xuat bao cao; bao cao tinh o service, khong luu bang tong rieng; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc bao cao moi; 3 yeu cau mo coi khuyen mai (R-18 GOAL-006, R-16 GOAL-007, R-17 GOAL-008) duoc loai tru co ly do (out-of-scope)
+# GOAL-010 v2: OmniFlow co bao cao + doi soat tren du lieu that da co: bao cao doanh thu theo kenh/chi nhanh/san pham/danh muc/thoi gian (mac dinh thang hien tai, chi tinh don completed, thoi gian theo thoi diem hoan tat tu order_events, hien thi Asia/Ho_Chi_Minh); bao cao ton kho + bien dong + canh bao ton thap; doi soat 3 mat kho–don–thanh toan (le th liet ke tung dong kem so ky vong vs thuc te, du lieu mau da biet cho 0 dong error); bao cao khuyen mai da dung + diem da doi; xuat CSV cho moi bao cao (so lieu khop API JSON); phan quyen xem bao cao theo vai + scope chi nhanh/kho (accountant toan org, sales chi chi nhanh minh, warehouse chi bao cao ton theo kho duoc gan); audit log cho xuat bao cao; bao cao tinh o service, khong luu bang tong rieng; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc bao cao moi; 3 yeu cau mo coi khuyen mai (R-18 GOAL-006, R-16 GOAL-007, R-17 GOAL-008) duoc loai tru co ly do (out-of-scope)
 
-Status: verified
+Status: approved
 
 ```json
 {
   "id": "GOAL-010",
-  "version": 1,
+  "version": 2,
   "outcome": "OmniFlow co bao cao + doi soat tren du lieu that da co: bao cao doanh thu theo kenh/chi nhanh/san pham/danh muc/thoi gian (mac dinh thang hien tai, chi tinh don completed, thoi gian theo thoi diem hoan tat tu order_events, hien thi Asia/Ho_Chi_Minh); bao cao ton kho + bien dong + canh bao ton thap; doi soat 3 mat kho–don–thanh toan (le th liet ke tung dong kem so ky vong vs thuc te, du lieu mau da biet cho 0 dong error); bao cao khuyen mai da dung + diem da doi; xuat CSV cho moi bao cao (so lieu khop API JSON); phan quyen xem bao cao theo vai + scope chi nhanh/kho (accountant toan org, sales chi chi nhanh minh, warehouse chi bao cao ton theo kho duoc gan); audit log cho xuat bao cao; bao cao tinh o service, khong luu bang tong rieng; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc bao cao moi; 3 yeu cau mo coi khuyen mai (R-18 GOAL-006, R-16 GOAL-007, R-17 GOAL-008) duoc loai tru co ly do (out-of-scope)",
   "source": {
     "path": "brief-010.md",
-    "sha256": "c70ceb64b3c270f49aeb3a9461770e283f3bfbb86d8f4c7b11d4895d9f847bbd",
-    "capturedAt": "2026-11-27T10:28:23.549Z",
+    "sha256": "75a653e0e8585ea8176c733d4ce2ccc9a4262627a88554779a4e234b00b62d7f",
+    "capturedAt": "2026-11-27T14:44:06.691Z",
     "origin": "human"
   },
   "requirements": [
@@ -389,7 +389,7 @@ Status: verified
       "command": "./scripts/demo.sh",
       "expect": "pass",
       "runs": 1,
-      "timeoutMs": 600000,
+      "timeoutMs": 1200000,
       "env": {}
     }
   ],

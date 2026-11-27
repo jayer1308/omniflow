@@ -482,3 +482,9 @@ phạm vi.
 
 - CHK-1: `./scripts/check.sh` — pass.
 - CHK-2: `./scripts/demo.sh` — pass.
+
+## Revise v2 — tăng timeout CHK-2 lên 20 phút (27/11/2026, sau khi goal v1 đã verified + merge)
+
+Lý do duy nhất của revise này: post-merge gate của close v1 TIMED OUT ở CHK-2 hai lần giống hệt nhau (CHK-1 pass cả hai lần; CHK-2 `delivery timed out`, exitCode null, log chỉ có header + `[apos] check timed out; process tree killed`). Nguyên nhân đã kiểm chứng trực tiếp: timeout mặc định của APOS cho một check là 600.000 ms (10 phút, `src/domain/contracts.ts` — `timeoutMs` default 600_000, max 3_600_000). `demo.sh` chạy standalone đã mất 6m43s khi máy yên; trong gate worktree (npm ci lạnh + CHK-1 vừa chạy trước + RAM free có lúc chỉ ~130MB, load cao) nó vượt 10 phút. Code không sai — close-stage layers L0–L3 đều xanh, kiểm chứng độc lập của coordinator (check.sh PASS + demo.sh PASS trên commit verified a1f46b7) cũng xanh.
+
+Thay đổi duy nhất ở v2: `checks` CHK-2 thêm `"timeoutMs": 1200000` (20 phút). CHK-1 giữ mặc định (đã pass 2 lần ở ~7 phút). Không đổi code, không đổi test, không đổi acceptance criteria, không đổi phạm vi. Goal version 1 → 2. Sau revise: Lead propose lại (goalVersion 2, proposal version 2), Tester/Worker submit lại đúng commit đã khóa/đã verified (test 2fc3aab, package a1f46b7), gate chạy lại với timeout mới rồi close.
