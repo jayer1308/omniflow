@@ -4886,5 +4886,28 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
+  // ---------- Bao cao + doi soat (GOAL-010) — STUB cua Tester ----------
+  // Worker implement 5 endpoint + src/reports.ts; stub tra 501 de test
+  // khoa do dung ly do (thieu tinh nang), khong phai loi setup.
+  function reportNotImplemented(res: Response): void {
+    res.status(501).json({ error: 'not implemented: bao cao chua co' });
+  }
+
+  app.get('/api/reports/revenue', requireAuth, (_req: TenantRequest, res: Response) => {
+    reportNotImplemented(res);
+  });
+  app.get('/api/reports/stock', requireAuth, (_req: TenantRequest, res: Response) => {
+    reportNotImplemented(res);
+  });
+  app.get('/api/reports/reconciliation', requireAuth, (_req: TenantRequest, res: Response) => {
+    reportNotImplemented(res);
+  });
+  app.get('/api/reports/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
+    reportNotImplemented(res);
+  });
+  app.get('/api/reports/points', requireAuth, (_req: TenantRequest, res: Response) => {
+    reportNotImplemented(res);
+  });
+
   return app;
 }

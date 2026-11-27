@@ -116,7 +116,14 @@ export type Action =
   | 'create-promotion'
   | 'update-promotion'
   | 'apply-promotion'
-  | 'view-promotions';
+  | 'view-promotions'
+  // GOAL-010 (STUB cua Tester): ma tran bao cao (docs/RBAC.md).
+  // can() chua co case cho 2 action nay nen mac dinh tra false; Worker
+  // implement dung ma tran brief (xem: owner/manager/accountant toan org,
+  // sales chi chi nhanh minh, warehouse chi bao cao ton kho duoc gan;
+  // xuat CSV: cung pham vi nhu xem, ghi audit 'export-report').
+  | 'view-reports'
+  | 'export-reports';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.

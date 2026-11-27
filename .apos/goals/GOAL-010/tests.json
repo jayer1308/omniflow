@@ -1,0 +1,67 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/reports-acceptance.test.ts::AC-1 ham thuan reportRange mac dinh thang hien tai va completedUtcRange chuyen 00 gio cong 7 sang UTC",
+      "tests/reports-acceptance.test.ts::AC-1 ham thuan allocateDiscounts phan bo diem va ma theo ti le line_total tren total",
+      "tests/reports-acceptance.test.ts::AC-1 ham thuan computeRevenueReport truc tiep tu DB khop tong don completed",
+      "tests/reports-acceptance.test.ts::AC-1 doanh thu chi tinh don completed don draft da thu dat coc va don cancelled khong vao",
+      "tests/reports-acceptance.test.ts::AC-1 don completed bi tra hang van tinh doanh thu gop tien hoan o cot rieng payment_status partially_refunded",
+      "tests/reports-acceptance.test.ts::AC-1 nhom theo kenh counter va web tong cac dong khop totals",
+      "tests/reports-acceptance.test.ts::AC-1 nhom theo chi nhanh chi nhanh 1 va chi nhanh 2 dung so",
+      "tests/reports-acceptance.test.ts::AC-1 nhom theo san pham phan bo diem va ma theo ti le tong dong khop net_revenue",
+      "tests/reports-acceptance.test.ts::AC-1 nhom theo danh muc san pham chua co danh muc vao Chua phan loai",
+      "tests/reports-acceptance.test.ts::AC-1 nhom theo thang key YYYY-MM va mac dinh thang hien tai khong truyen from to",
+      "tests/reports-acceptance.test.ts::AC-1 bien mui gio don hoan tat 00 gio 30 cong 7 ngay 1 thuoc ngay 1 khong roi sang hom truoc",
+      "tests/reports-acceptance.test.ts::AC-1 ky rong totals 0 rows rong 200",
+      "tests/reports-acceptance.test.ts::AC-1 validate kenh la group_by la from lon hon to ngay sai 400 chi nhanh khong ton tai 404 chi nhanh org B 403"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/reports-acceptance.test.ts::AC-2 bao cao ton levels available bang on_hand tru reserved va movements tom tat theo loai trong ky",
+      "tests/reports-acceptance.test.ts::AC-2 canh bao ton thap available nho hon min_stock kem shortage",
+      "tests/reports-acceptance.test.ts::AC-2 bao cao ton loc kho va bien the khong ton tai 404 kho org B 403 kho inactive van hien",
+      "tests/reports-acceptance.test.ts::AC-2 doi soat du lieu chuan khong co dong error khong co stock-level hay order-stock don thieu thu co dong info",
+      "tests/reports-acceptance.test.ts::AC-2 doi soat don thu thua outstanding am co dong info thu thua",
+      "tests/reports-acceptance.test.ts::AC-2 doi soat chen lech ton truc tiep o DB thay stock_levels thay dong stock-level kem so ky vong va thuc te",
+      "tests/reports-acceptance.test.ts::AC-2 doi soat xoa movement out cua don completed thay dong order-stock kem ma don va bien the",
+      "tests/reports-acceptance.test.ts::AC-2 ham thuan computeReconciliationReport truc tiep khong co dong error tren du lieu chuan",
+      "tests/reports-acceptance.test.ts::AC-2 doi soat tung don dung lai computePaymentSummary outstanding va payment_status giu logic D22"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/reports-acceptance.test.ts::AC-3 bao cao khuyen mai so ma tong giam theo ma va ma chua dung van hien so 0",
+      "tests/reports-acceptance.test.ts::AC-3 bao cao khuyen mai huy don hoan luot released_count 1 total_discount 0",
+      "tests/reports-acceptance.test.ts::AC-3 bao cao diem tich va doi redeemed_amount bang diem doi nhan 100d",
+      "tests/reports-acceptance.test.ts::AC-3 ham thuan computePromotionsReport va computePointsReport truc tiep khop API",
+      "tests/reports-acceptance.test.ts::AC-3 xuat CSV doanh thu khop JSON tung so kem dong TOTAL",
+      "tests/reports-acceptance.test.ts::AC-3 xuat CSV ton kho khop JSON kem ten co dau phay duoc quote",
+      "tests/reports-acceptance.test.ts::AC-3 xuat CSV doi soat khop JSON tung dong lech",
+      "tests/reports-acceptance.test.ts::AC-3 xuat CSV khuyen mai va diem khop JSON kem dong TOTAL",
+      "tests/reports-acceptance.test.ts::AC-3 format la 400 tren moi endpoint bao cao"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/reports-acceptance.test.ts::AC-4 can 2 actions bao cao theo dung ma tran brief",
+      "tests/reports-acceptance.test.ts::AC-4 RBAC 403 sales xem doanh thu chi nhanh khac sales xem bao cao ton warehouse xem doanh thu",
+      "tests/reports-acceptance.test.ts::AC-4 RBAC 403 warehouse xem ton kho ngoai pham vi va user org A doc bao cao org B",
+      "tests/reports-acceptance.test.ts::AC-4 RBAC duong accountant xem toan org 200 sales xem doanh thu chi nhanh minh 200 warehouse xem ton kho duoc gan 200",
+      "tests/reports-acceptance.test.ts::AC-4 audit xuat CSV ghi dung 1 ban ghi khop filter xem JSON khong tang xuat lai tang them 1",
+      "tests/reports-acceptance.test.ts::AC-4 GET bao cao 2 lan tra cung ket qua khong yeu cau idempotency"
+    ]
+  }
+]
