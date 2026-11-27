@@ -1,6 +1,6 @@
 # GOAL-006 v1: OmniFlow co nghiep vu thanh toan + hoan tien tren don hang GOAL-005: ghi nhan thu tien mat/chuyen khoan (paid ngay) va qua cong fake (requested roi webhook chot, dung mot lan du webhook tre/lap/sai thu tu); hoan tien bang ban ghi rieng, khong bao gio hoan vuot so da tra; idempotency trong transaction cho tao payment + hoan tien; doi soat don-thanh toan tung don + lich su giao dich append-only; RBAC theo ma tran thanh toan + audit log day du; KHONG luu thong tin the; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc thanh toan moi
 
-Status: testing
+Status: verified
 
 ```json
 {
