@@ -1,6 +1,6 @@
 # GOAL-010: controller gate green
 
-Base 2fc3aab8a06a3bf6a729d3791631edbbc3a0b1fa → delivery a1f46b788bc29278c60bb6a8d1f733ecb4b434d5 (/bin/sh, v24.22.1)
+Base 92280057798a4f114b0a79fd2127b6d4d33e1aba → delivery 46995b4069f438e836936d2ba22b40cf788a51d1 (/bin/sh, v24.22.1)
 
 - CHK-1: **pass** — exit 0 on delivery
 - CHK-2: **pass** — exit 0 on delivery
