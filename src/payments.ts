@@ -10,7 +10,13 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-export type PaymentStatus = 'unpaid' | 'partially_paid' | 'paid' | 'overpaid' | 'refunded';
+export type PaymentStatus =
+  | 'unpaid'
+  | 'partially_paid'
+  | 'paid'
+  | 'overpaid'
+  | 'refunded'
+  | 'partially_refunded';
 
 export type PaymentRowStatus =
   | 'requested'
@@ -72,9 +78,20 @@ export interface PaymentDetail extends PaymentRow {
  * Tom tat doi soat cua mot don: order_total (tong don GOAL-005),
  * paid_total (tong payment 'paid' tru tong refund 'completed'),
  * refunded_total, outstanding (order_total - paid_total, am nghia la thua),
- * payment_status suy ra (unpaid/partially_paid/paid/overpaid/refunded).
+ * payment_status suy ra (unpaid/partially_paid/paid/overpaid/refunded/
+ * partially_refunded).
  * payment_status 'refunded' khi paid_total ve 0 sau khi da tung tra
  * (refunded_total > 0); chua tra gi thi 'unpaid'.
+ * 'partially_refunded' (GOAL-007, D25) chi khi don co yeu cau tra da
+ * hoan tien (returns.status = 'refunded') ma van con tien rong da tra
+ * (paid_total > 0): phan biet voi hoan tien truc tiep GOAL-006 — test
+ * khoa GOAL-006 giu 'partially_paid' cho hoan truc tiep mot phan (don
+ * draft, khong co return), test khoa GOAL-007 doi 'partially_refunded'
+ * cho hoan qua tra hang (don completed, co return da refunded). Cung
+ * trang thai so hoc (0 < paid_total < order_total, refunded_total > 0)
+ * nhung hai bo test khoa doi hai nhan khac nhau nen phai phan biet
+ * bang nguon hoan (co return da refunded hay khong); day la sua toi
+ * thieu giu ca hai bo test xanh, khong doi hanh vi doi soat GOAL-006.
  */
 export function computePaymentSummary(
   db: DatabaseSync,
@@ -101,9 +118,18 @@ export function computePaymentSummary(
   const refundedTotal = refundedRow.s;
   const paidTotal = paidRow.s - refundedTotal;
   const outstanding = orderTotal - paidTotal;
+  const hasRefundedReturn = (
+    db
+      .prepare(
+        "SELECT 1 AS x FROM returns WHERE order_id = ? AND status = 'refunded' LIMIT 1",
+      )
+      .get(orderId) as { x: number } | undefined
+  ) !== undefined;
   let paymentStatus: PaymentStatus;
   if (paidTotal === 0) {
     paymentStatus = refundedTotal > 0 ? 'refunded' : 'unpaid';
+  } else if (refundedTotal > 0 && hasRefundedReturn) {
+    paymentStatus = 'partially_refunded';
   } else if (paidTotal < orderTotal) {
     paymentStatus = 'partially_paid';
   } else if (paidTotal === orderTotal) {

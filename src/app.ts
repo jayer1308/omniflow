@@ -13,7 +13,7 @@ import {
 } from './auth.js';
 import type { SessionUser } from './auth.js';
 import { withIdempotency } from './idempotency.js';
-import { FakePaymentAdapter } from './adapters/index.js';
+import { FakePaymentAdapter, FakeShippingAdapter } from './adapters/index.js';
 import {
   completedRefundTotal,
   computePaymentSummary,
@@ -514,6 +514,720 @@ function createRefundTx(
     payment: paymentDetail(db, payment.id) as PaymentDetail,
     order_summary: computePaymentSummary(db, order.id),
   };
+}
+
+// ---------- Giao hang + tra hang (GOAL-007, D24/D25) ----------
+// Service chay trong transaction BEGIN IMMEDIATE (route boc bang
+// runStockOp/withStockIdempotency khi co key, runStockTransaction khi
+// khong) — giong createPaymentTx/createRefundTx o tren. Loi nghiep vu
+// nem ra la Error co ma o dau message, route map sang HTTP:
+// 'bad_request' -> 400, 'not_found' -> 404, 'forbidden' -> 403.
+
+type ShipmentStatus = 'requested' | 'in_transit' | 'delivered' | 'failed';
+type ReturnStatus = 'requested' | 'approved' | 'rejected' | 'received' | 'refunded';
+type ReturnCondition = 'resalable' | 'damaged';
+
+interface ShipmentRow {
+  id: number;
+  org_id: number;
+  order_id: number;
+  carrier: string;
+  tracking_code: string;
+  destination: string;
+  fee: number;
+  eta_days: number;
+  status: ShipmentStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ShipmentEventRow {
+  id: number;
+  shipment_id: number;
+  event_type: string;
+  actor_id: number | null;
+  detail: string | null;
+  created_at: string;
+}
+
+interface ShipmentDetail extends ShipmentRow {
+  events: ShipmentEventRow[];
+}
+
+interface ReturnRow {
+  id: number;
+  org_id: number;
+  order_id: number;
+  code: string;
+  reason: string;
+  status: ReturnStatus;
+  reviewed_by: number | null;
+  received_by: number | null;
+  review_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ReturnItemRow {
+  id: number;
+  return_id: number;
+  variant_id: number;
+  qty: number;
+  condition: ReturnCondition;
+  unit_price: number;
+}
+
+interface ReturnEventRow {
+  id: number;
+  return_id: number;
+  event_type: string;
+  actor_id: number | null;
+  detail: string | null;
+  created_at: string;
+}
+
+interface ReturnDetail extends ReturnRow {
+  items: ReturnItemRow[];
+  events: ReturnEventRow[];
+}
+
+/** Chuyen trang thai giao hang hop le (state machine rieng, D24). */
+const SHIPMENT_TRANSITIONS: Record<ShipmentStatus, ShipmentStatus[]> = {
+  requested: ['in_transit', 'failed'],
+  in_transit: ['delivered', 'failed'],
+  delivered: [],
+  failed: [],
+};
+
+function loadShipmentRow(db: DatabaseSync, shipmentId: number): ShipmentRow | undefined {
+  return db.prepare('SELECT * FROM shipments WHERE id = ?').get(shipmentId) as
+    | ShipmentRow
+    | undefined;
+}
+
+function loadReturnRow(db: DatabaseSync, returnId: number): ReturnRow | undefined {
+  return db.prepare('SELECT * FROM returns WHERE id = ?').get(returnId) as ReturnRow | undefined;
+}
+
+function loadShipmentEvents(db: DatabaseSync, shipmentId: number): ShipmentEventRow[] {
+  return db
+    .prepare('SELECT * FROM shipment_events WHERE shipment_id = ? ORDER BY id')
+    .all(shipmentId) as unknown as ShipmentEventRow[];
+}
+
+function loadReturnItems(db: DatabaseSync, returnId: number): ReturnItemRow[] {
+  return db
+    .prepare('SELECT * FROM return_items WHERE return_id = ? ORDER BY id')
+    .all(returnId) as unknown as ReturnItemRow[];
+}
+
+function loadReturnEvents(db: DatabaseSync, returnId: number): ReturnEventRow[] {
+  return db
+    .prepare('SELECT * FROM return_events WHERE return_id = ? ORDER BY id')
+    .all(returnId) as unknown as ReturnEventRow[];
+}
+
+/** 1 shipment kem events (cu nhat truoc, nhu order_events D19). */
+function shipmentDetail(db: DatabaseSync, shipmentId: number): ShipmentDetail {
+  const row = loadShipmentRow(db, shipmentId) as ShipmentRow;
+  return { ...row, events: loadShipmentEvents(db, shipmentId) };
+}
+
+/** 1 yeu cau tra kem items + events (cu nhat truoc). */
+function returnDetail(db: DatabaseSync, returnId: number): ReturnDetail {
+  const row = loadReturnRow(db, returnId) as ReturnRow;
+  return { ...row, items: loadReturnItems(db, returnId), events: loadReturnEvents(db, returnId) };
+}
+
+/** Ghi 1 event append-only cho shipment (chi INSERT, khong sua/xoa). */
+function insertShipmentEvent(
+  db: DatabaseSync,
+  shipmentId: number,
+  eventType: string,
+  actorId: number | null,
+  detail: Record<string, unknown> | null,
+): void {
+  db.prepare(
+    `INSERT INTO shipment_events (shipment_id, event_type, actor_id, detail, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    shipmentId,
+    eventType,
+    actorId,
+    detail === null ? null : JSON.stringify(detail),
+    new Date().toISOString(),
+  );
+}
+
+/** Ghi 1 event append-only cho yeu cau tra (chi INSERT, khong sua/xoa). */
+function insertReturnEvent(
+  db: DatabaseSync,
+  returnId: number,
+  eventType: string,
+  actorId: number | null,
+  detail: Record<string, unknown> | null,
+): void {
+  db.prepare(
+    `INSERT INTO return_events (return_id, event_type, actor_id, detail, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    returnId,
+    eventType,
+    actorId,
+    detail === null ? null : JSON.stringify(detail),
+    new Date().toISOString(),
+  );
+}
+
+/** Ma tra hang TH-YYYYMMDD-NNNN (gio dia phuong, so thu tu trong ngay theo org). */
+function formatReturnCode(date: Date, seq: number): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `TH-${y}${m}${d}-${String(seq).padStart(4, '0')}`;
+}
+
+/**
+ * Tao shipment trong transaction: chi don completed, carrier/destination
+ * bat buoc, toi da 1 shipment chua cuoi moi don, fee/eta tu
+ * FakeShippingAdapter.quote() (khoi luong = tong so luong x 500g),
+ * tracking_code deterministic theo shipment id vua insert. Giao hang KHONG
+ * doi trang thai don.
+ */
+function createShipmentTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  orderId: number,
+  body: { carrier?: unknown; destination?: unknown },
+): { shipment: ShipmentDetail } {
+  const order = loadPaymentOrder(db, orderId);
+  if (!order) throw payNotFound('không tìm thấy đơn hàng');
+  if (order.org_id !== actor.orgId) throw payForbidden('đơn không thuộc doanh nghiệp của bạn');
+  if (
+    !can(actor, 'request-shipment', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép yêu cầu giao đơn này');
+  }
+  const carrier = body.carrier;
+  if (typeof carrier !== 'string' || carrier.trim().length === 0) {
+    throw payBad('carrier bắt buộc');
+  }
+  const destination = body.destination;
+  if (typeof destination !== 'string' || destination.trim().length === 0) {
+    throw payBad('destination bắt buộc');
+  }
+  if (order.status !== 'completed') throw payBad('chỉ đơn đã hoàn tất mới được giao');
+  const open = db
+    .prepare(
+      "SELECT id FROM shipments WHERE order_id = ? AND status IN ('requested', 'in_transit')",
+    )
+    .get(orderId) as { id: number } | undefined;
+  if (open) throw payBad('đơn đã có shipment chưa hoàn tất');
+  const totalQty = db
+    .prepare('SELECT COALESCE(SUM(qty), 0) AS s FROM order_items WHERE order_id = ?')
+    .get(orderId) as { s: number };
+  const quote = new FakeShippingAdapter().quote(totalQty.s * 500, destination.trim());
+  const now = new Date().toISOString();
+  const shipmentId = Number(
+    db
+      .prepare(
+        `INSERT INTO shipments (org_id, order_id, carrier, tracking_code, destination,
+          fee, eta_days, status, created_at, updated_at)
+         VALUES (?, ?, ?, '', ?, ?, ?, 'requested', ?, ?)`,
+      )
+      .run(
+        actor.orgId,
+        orderId,
+        carrier.trim(),
+        destination.trim(),
+        quote.fee,
+        quote.etaDays,
+        now,
+        now,
+      ).lastInsertRowid,
+  );
+  // Ma van don deterministic theo shipment id (D24): insert truoc lay id
+  // roi cap nhat ma trong cung transaction — khong bao gio lo trang thai
+  // trung gian ra ngoai.
+  const trackingCode = new FakeShippingAdapter().trackingRef(
+    order.code,
+    carrier.trim(),
+    shipmentId,
+  );
+  db.prepare('UPDATE shipments SET tracking_code = ? WHERE id = ?').run(trackingCode, shipmentId);
+  insertShipmentEvent(db, shipmentId, 'created', actor.id, {
+    carrier: carrier.trim(),
+    tracking_code: trackingCode,
+    fee: quote.fee,
+    eta_days: quote.etaDays,
+  });
+  insertAudit(db, actor.orgId, actor.id, 'create-shipment', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_shipment_id: shipmentId,
+    tracking_code: trackingCode,
+    from_status: null,
+    to_status: 'requested',
+  });
+  return { shipment: shipmentDetail(db, shipmentId) };
+}
+
+/**
+ * Cap nhat trang thai giao trong transaction. Gui lai cung trang thai la
+ * no-op o muc trang thai: tra shipment hien tai, KHONG tao event moi,
+ * KHONG ghi audit moi. Chuyen sai thu tu -> 400, khong doi gi, khong ghi
+ * event. `failed` bat buoc co reason, la trang thai cuoi.
+ */
+function updateShipmentTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  shipmentId: number,
+  body: { status?: unknown; reason?: unknown },
+): { shipment: ShipmentDetail } {
+  const shipment = loadShipmentRow(db, shipmentId);
+  if (!shipment) throw payNotFound('không tìm thấy shipment');
+  if (shipment.org_id !== actor.orgId) {
+    throw payForbidden('shipment không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, shipment.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'update-shipment', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép cập nhật trạng thái giao đơn này');
+  }
+  const status = body.status;
+  if (status !== 'in_transit' && status !== 'delivered' && status !== 'failed') {
+    throw payBad('status phải thuộc in_transit/delivered/failed');
+  }
+  if (status === shipment.status) return { shipment: shipmentDetail(db, shipment.id) };
+  if (status === 'failed') {
+    const reason = body.reason;
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      throw payBad('failed bắt buộc có reason');
+    }
+  }
+  if (!SHIPMENT_TRANSITIONS[shipment.status].includes(status)) {
+    throw payBad(`không thể chuyển giao hàng từ ${shipment.status} sang ${status}`);
+  }
+  const now = new Date().toISOString();
+  db.prepare('UPDATE shipments SET status = ?, updated_at = ? WHERE id = ?').run(
+    status,
+    now,
+    shipment.id,
+  );
+  const detail: Record<string, unknown> = { from_status: shipment.status, to_status: status };
+  if (status === 'failed') detail.reason = (body.reason as string).trim();
+  insertShipmentEvent(db, shipment.id, status, actor.id, detail);
+  insertAudit(db, actor.orgId, actor.id, 'update-shipment', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_shipment_id: shipment.id,
+    tracking_code: shipment.tracking_code,
+    from_status: shipment.status,
+    to_status: status,
+    ...(status === 'failed' ? { reason: (body.reason as string).trim() } : {}),
+  });
+  return { shipment: shipmentDetail(db, shipment.id) };
+}
+
+/**
+ * Tao yeu cau tra trong transaction: chi don completed, reason + items
+ * bat buoc, bien the phai thuoc don, khong trung bien the trong cung yeu
+ * cau, tong tra tich luy moi bien the (cong MOI yeu cau chua bi tu choi,
+ * ke ca dang cho duyet) khong vuot so da dat. unit_price snapshot tu
+ * order_items, khong tin client. Tra hang KHONG doi trang thai don.
+ */
+function createReturnTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  orderId: number,
+  body: { items?: unknown; reason?: unknown },
+): { return: ReturnDetail } {
+  const order = loadPaymentOrder(db, orderId);
+  if (!order) throw payNotFound('không tìm thấy đơn hàng');
+  if (order.org_id !== actor.orgId) throw payForbidden('đơn không thuộc doanh nghiệp của bạn');
+  if (
+    !can(actor, 'request-return', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép yêu cầu trả đơn này');
+  }
+  const reason = body.reason;
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw payBad('reason trả hàng bắt buộc');
+  }
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    throw payBad('items phải là mảng không rỗng');
+  }
+  if (order.status !== 'completed') throw payBad('chỉ đơn đã hoàn tất mới được trả hàng');
+  const seen = new Set<number>();
+  const lines: { variant_id: number; qty: number; condition: ReturnCondition }[] = [];
+  for (const raw of body.items as unknown[]) {
+    if (typeof raw !== 'object' || raw === null) throw payBad('dòng trả hàng không hợp lệ');
+    const variantId = (raw as { variant_id?: unknown }).variant_id;
+    const qty = (raw as { qty?: unknown }).qty;
+    const condition = (raw as { condition?: unknown }).condition;
+    if (typeof variantId !== 'number' || !Number.isInteger(variantId)) {
+      throw payBad('variant_id không hợp lệ');
+    }
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty <= 0) {
+      throw payBad('qty phải là số nguyên > 0');
+    }
+    if (condition !== 'resalable' && condition !== 'damaged') {
+      throw payBad('condition phải thuộc resalable/damaged');
+    }
+    if (seen.has(variantId)) throw payBad('trùng biến thể trong cùng một yêu cầu trả');
+    seen.add(variantId);
+    lines.push({ variant_id: variantId, qty, condition });
+  }
+  const orderItems = db
+    .prepare('SELECT variant_id, qty, unit_price FROM order_items WHERE order_id = ?')
+    .all(orderId) as { variant_id: number; qty: number; unit_price: number }[];
+  const byVariant = new Map(orderItems.map((i) => [i.variant_id, i]));
+  for (const line of lines) {
+    const ordered = byVariant.get(line.variant_id);
+    if (!ordered) throw payBad('biến thể không thuộc đơn này');
+    const already = db
+      .prepare(
+        `SELECT COALESCE(SUM(ri.qty), 0) AS s FROM return_items ri
+         JOIN returns r ON r.id = ri.return_id
+         WHERE r.order_id = ? AND ri.variant_id = ? AND r.status <> 'rejected'`,
+      )
+      .get(orderId, line.variant_id) as { s: number };
+    if (already.s + line.qty > ordered.qty) {
+      throw payBad('tổng trả vượt số lượng đã đặt');
+    }
+  }
+  const now = new Date().toISOString();
+  const today = formatReturnCode(new Date(), 0).slice(0, 11);
+  const seq = (
+    db
+      .prepare('SELECT COUNT(*) AS c FROM returns WHERE org_id = ? AND code LIKE ?')
+      .get(actor.orgId, `${today}%`) as { c: number }
+  ).c + 1;
+  const code = formatReturnCode(new Date(), seq);
+  const returnId = Number(
+    db
+      .prepare(
+        `INSERT INTO returns (org_id, order_id, code, reason, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'requested', ?, ?)`,
+      )
+      .run(actor.orgId, orderId, code, reason.trim(), now, now).lastInsertRowid,
+  );
+  for (const line of lines) {
+    const ordered = byVariant.get(line.variant_id) as { unit_price: number };
+    db.prepare(
+      `INSERT INTO return_items (return_id, variant_id, qty, condition, unit_price)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(returnId, line.variant_id, line.qty, line.condition, ordered.unit_price);
+  }
+  insertReturnEvent(db, returnId, 'created', actor.id, {
+    reason: reason.trim(),
+    items: lines.map((l) => ({
+      variant_id: l.variant_id,
+      qty: l.qty,
+      condition: l.condition,
+    })),
+  });
+  insertAudit(db, actor.orgId, actor.id, 'create-return', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_return_id: returnId,
+    return_code: code,
+    from_status: null,
+    to_status: 'requested',
+  });
+  return { return: returnDetail(db, returnId) };
+}
+
+/**
+ * Duyet/tu choi tra trong transaction: chi tu `requested`. Tu choi bat
+ * buoc co reason. Ghi reviewed_by/review_reason + event + audit.
+ */
+function reviewReturnTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  returnId: number,
+  decision: 'approved' | 'rejected',
+  body: { reason?: unknown },
+): { return: ReturnDetail } {
+  const ret = loadReturnRow(db, returnId);
+  if (!ret) throw payNotFound('không tìm thấy yêu cầu trả');
+  if (ret.org_id !== actor.orgId) {
+    throw payForbidden('yêu cầu trả không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, ret.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'review-return', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép duyệt/từ chối trả hàng');
+  }
+  if (ret.status !== 'requested') {
+    throw payBad('chỉ duyệt/từ chối yêu cầu trả đang chờ');
+  }
+  const reason = body.reason;
+  if (decision === 'rejected') {
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      throw payBad('từ chối bắt buộc có reason');
+    }
+  }
+  const reviewReason = typeof reason === 'string' ? reason.trim() : null;
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE returns SET status = ?, reviewed_by = ?, review_reason = ?, updated_at = ? WHERE id = ?',
+  ).run(decision, actor.id, reviewReason, now, ret.id);
+  insertReturnEvent(db, ret.id, decision, actor.id, { review_reason: reviewReason });
+  insertAudit(db, actor.orgId, actor.id, 'review-return', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_return_id: ret.id,
+    return_code: ret.code,
+    from_status: 'requested',
+    to_status: decision,
+  });
+  return { return: returnDetail(db, ret.id) };
+}
+
+/**
+ * Nhan hang tra trong transaction BEGIN IMMEDIATE: doi trang thai +
+ * nhap lai kho trong CUNG MOT transaction. Mat hang resalable nhap lai
+ * kho cua don bang applyMovement loai `in` (reference = ma tra); damaged
+ * KHONG nhap kho, KHONG ghi movement — chi ghi nhan trong event detail.
+ */
+function receiveReturnTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  returnId: number,
+): { return: ReturnDetail } {
+  const ret = loadReturnRow(db, returnId);
+  if (!ret) throw payNotFound('không tìm thấy yêu cầu trả');
+  if (ret.org_id !== actor.orgId) {
+    throw payForbidden('yêu cầu trả không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, ret.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'receive-return', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép nhận hàng trả của đơn này');
+  }
+  if (ret.status !== 'approved') throw payBad('chỉ nhận hàng trả đã duyệt');
+  const items = loadReturnItems(db, ret.id);
+  const restocked: { variant_id: number; qty: number }[] = [];
+  const damaged: { variant_id: number; qty: number }[] = [];
+  for (const item of items) {
+    if (item.condition === 'resalable') {
+      applyMovement(db, actor.orgId, actor.id, {
+        warehouse_id: order.warehouse_id,
+        variant_id: item.variant_id,
+        type: 'in',
+        qty_change: item.qty,
+        reason: `Nhập lại kho từ trả hàng ${ret.code}`,
+        reference: ret.code,
+      });
+      restocked.push({ variant_id: item.variant_id, qty: item.qty });
+    } else {
+      damaged.push({ variant_id: item.variant_id, qty: item.qty });
+    }
+  }
+  const now = new Date().toISOString();
+  db.prepare("UPDATE returns SET status = 'received', received_by = ?, updated_at = ? WHERE id = ?").run(
+    actor.id,
+    now,
+    ret.id,
+  );
+  insertReturnEvent(db, ret.id, 'received', actor.id, { restocked, damaged });
+  insertAudit(db, actor.orgId, actor.id, 'receive-return', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_return_id: ret.id,
+    return_code: ret.code,
+    from_status: 'approved',
+    to_status: 'received',
+  });
+  return { return: returnDetail(db, ret.id) };
+}
+
+/**
+ * Hoan tien tra hang trong transaction: so tien = tong unit_price x qty
+ * tren MOI mat hang (ca resalable lan damaged), tinh tu snapshot
+ * order_items. Dung DUNG duong GOAL-006 (createRefundTx + bang refunds):
+ * hoan vao cac payment da `paid` cua don theo thu tu cu nhat truoc, moi
+ * lan hoan la mot ban ghi refunds rieng voi reason = ma tra. Vuot so con
+ * hoan duoc -> 400, khong tao refund nao, yeu cau tra o lai `received`.
+ */
+function refundReturnTx(
+  db: DatabaseSync,
+  actor: SessionUser,
+  returnId: number,
+): {
+  return: ReturnDetail;
+  refunds: Record<string, unknown>[];
+  order_summary: OrderPaymentSummary;
+} {
+  const ret = loadReturnRow(db, returnId);
+  if (!ret) throw payNotFound('không tìm thấy yêu cầu trả');
+  if (ret.org_id !== actor.orgId) {
+    throw payForbidden('yêu cầu trả không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, ret.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'refund-return', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép hoàn tiền trả hàng');
+  }
+  if (ret.status !== 'received') throw payBad('chỉ hoàn tiền yêu cầu trả đã nhận hàng');
+  const items = loadReturnItems(db, ret.id);
+  const amount = items.reduce((sum, item) => sum + item.unit_price * item.qty, 0);
+  const payments = db
+    .prepare(
+      `SELECT * FROM payments WHERE order_id = ? AND status IN ('paid', 'partially_refunded') ORDER BY id`,
+    )
+    .all(order.id) as unknown as PaymentRow[];
+  const perPayment: { payment: PaymentRow; available: number }[] = [];
+  let refundable = 0;
+  for (const payment of payments) {
+    const available = payment.amount - completedRefundTotal(db, payment.id);
+    if (available > 0) {
+      perPayment.push({ payment, available });
+      refundable += available;
+    }
+  }
+  if (amount > refundable) throw payBad('số tiền hoàn vượt số còn hoàn được của đơn');
+  const refunds: Record<string, unknown>[] = [];
+  let remaining = amount;
+  for (const { payment, available } of perPayment) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, available);
+    const out = createRefundTx(db, actor, payment.id, { amount: take, reason: ret.code });
+    refunds.push(out.refund);
+    remaining -= take;
+  }
+  const now = new Date().toISOString();
+  db.prepare("UPDATE returns SET status = 'refunded', updated_at = ? WHERE id = ?").run(
+    now,
+    ret.id,
+  );
+  insertReturnEvent(db, ret.id, 'refunded', actor.id, {
+    refund_amount: amount,
+    refund_ids: refunds.map((r) => r.id),
+  });
+  insertAudit(db, actor.orgId, actor.id, 'refund-return', {
+    target_order_id: order.id,
+    order_code: order.code,
+    target_return_id: ret.id,
+    return_code: ret.code,
+    from_status: 'received',
+    to_status: 'refunded',
+    refund_amount: amount,
+  });
+  return {
+    return: returnDetail(db, ret.id),
+    refunds,
+    order_summary: computePaymentSummary(db, order.id),
+  };
+}
+
+/** Danh sach shipment cua 1 don (moi nhat truoc, kem events), co gate RBAC. */
+function getOrderShipments(db: DatabaseSync, actor: SessionUser, orderId: number): ShipmentDetail[] {
+  const order = loadPaymentOrder(db, orderId);
+  if (!order) throw payNotFound('không tìm thấy đơn hàng');
+  if (order.org_id !== actor.orgId) throw payForbidden('đơn không thuộc doanh nghiệp của bạn');
+  if (
+    !can(actor, 'view-shipments', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép xem giao hàng của đơn này');
+  }
+  const rows = db
+    .prepare('SELECT id FROM shipments WHERE order_id = ? ORDER BY id DESC')
+    .all(orderId) as { id: number }[];
+  return rows.map((r) => shipmentDetail(db, r.id));
+}
+
+/** 1 shipment kem events, co gate RBAC. */
+function getShipment(db: DatabaseSync, actor: SessionUser, shipmentId: number): ShipmentDetail {
+  const shipment = loadShipmentRow(db, shipmentId);
+  if (!shipment) throw payNotFound('không tìm thấy shipment');
+  if (shipment.org_id !== actor.orgId) {
+    throw payForbidden('shipment không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, shipment.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'view-shipments', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép xem shipment này');
+  }
+  return shipmentDetail(db, shipment.id);
+}
+
+/** Danh sach yeu cau tra cua 1 don (moi nhat truoc, kem items + events), co gate RBAC. */
+function getOrderReturns(db: DatabaseSync, actor: SessionUser, orderId: number): ReturnDetail[] {
+  const order = loadPaymentOrder(db, orderId);
+  if (!order) throw payNotFound('không tìm thấy đơn hàng');
+  if (order.org_id !== actor.orgId) throw payForbidden('đơn không thuộc doanh nghiệp của bạn');
+  if (
+    !can(actor, 'view-returns', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép xem trả hàng của đơn này');
+  }
+  const rows = db
+    .prepare('SELECT id FROM returns WHERE order_id = ? ORDER BY id DESC')
+    .all(orderId) as { id: number }[];
+  return rows.map((r) => returnDetail(db, r.id));
+}
+
+/** 1 yeu cau tra kem items + events, co gate RBAC. */
+function getReturn(db: DatabaseSync, actor: SessionUser, returnId: number): ReturnDetail {
+  const ret = loadReturnRow(db, returnId);
+  if (!ret) throw payNotFound('không tìm thấy yêu cầu trả');
+  if (ret.org_id !== actor.orgId) {
+    throw payForbidden('yêu cầu trả không thuộc doanh nghiệp của bạn');
+  }
+  const order = loadPaymentOrder(db, ret.order_id) as PaymentOrderRow;
+  if (
+    !can(actor, 'view-returns', {
+      orgId: actor.orgId,
+      branchId: order.branch_id,
+      warehouseId: order.warehouse_id,
+    })
+  ) {
+    throw payForbidden('bạn không được phép xem yêu cầu trả này');
+  }
+  return returnDetail(db, ret.id);
 }
 
 export function createApp(db: DatabaseSync): Express {
@@ -3527,32 +4241,193 @@ export function createApp(db: DatabaseSync): Express {
     });
   });
 
-  // ---------- Giao hang + tra hang (GOAL-007) — STUB cho Tester ----------
-  // Worker thay bang logic that: hien tai moi endpoint giao/tra tra 501
-  // "not implemented" de test acceptance DO dung ly do. Route DELETE
-  // shipment/return / sua-xoa lich su giao/tra cung la stub 501 (khong phai
-  // 404/405) de test "khong co endpoint" DO tren stub va xanh khi Worker
-  // bo route di (Express tra 404 mac dinh).
-  const shipReturnNotImplemented = (_req: TenantRequest, res: Response): void => {
-    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
-  };
-  app.post('/api/orders/:id/shipments', shipReturnNotImplemented);
-  app.post('/api/shipments/:id/status', shipReturnNotImplemented);
-  app.get('/api/orders/:id/shipments', shipReturnNotImplemented);
-  app.get('/api/shipments/:id', shipReturnNotImplemented);
-  app.delete('/api/shipments/:id', shipReturnNotImplemented);
-  app.patch('/api/shipments/:id/events/:eventId', shipReturnNotImplemented);
-  app.delete('/api/shipments/:id/events/:eventId', shipReturnNotImplemented);
-  app.post('/api/orders/:id/returns', shipReturnNotImplemented);
-  app.post('/api/returns/:id/approve', shipReturnNotImplemented);
-  app.post('/api/returns/:id/reject', shipReturnNotImplemented);
-  app.post('/api/returns/:id/receive', shipReturnNotImplemented);
-  app.post('/api/returns/:id/refund', shipReturnNotImplemented);
-  app.get('/api/orders/:id/returns', shipReturnNotImplemented);
-  app.get('/api/returns/:id', shipReturnNotImplemented);
-  app.delete('/api/returns/:id', shipReturnNotImplemented);
-  app.patch('/api/returns/:id/events/:eventId', shipReturnNotImplemented);
-  app.delete('/api/returns/:id/events/:eventId', shipReturnNotImplemented);
+  // ---------- Giao hang + tra hang (GOAL-007, D24/D25) ----------
+  // Tao/cap nhat/nhan/hoan qua withStockIdempotency (ten mien
+  // shipment:create:<key> / shipment:update:<key> / return:create:<key> /
+  // return:review:<key> / return:receive:<key> / return:refund:<key>):
+  // kiem tra key + thuc thi + ghi key trong CUNG MOT transaction
+  // BEGIN IMMEDIATE. Gui lai tra response cu kem replayed: true.
+  // Khong co endpoint DELETE shipment/return, khong co API sua/xoa lich
+  // su giao/tra (append-only): goi cac route do tra 404 mac dinh cua
+  // Express.
+
+  /** Map loi nghiep vu giao/tra sang HTTP (nhu paymentFail/orderFail). */
+  function shipReturnFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: 'Lỗi hệ thống khi xử lý giao/trả hàng' });
+  }
+
+  /** Key idempotency cho giao/tra, tu header hoac body (thieu key van chay). */
+  function shipReturnKey(req: TenantRequest, domain: string, op: string): string | null {
+    const header = req.headers['idempotency-key'];
+    const body = (req.body ?? {}) as { idempotency_key?: unknown };
+    const raw =
+      (typeof header === 'string' && header.length > 0 ? header : null) ??
+      (typeof body.idempotency_key === 'string' && body.idempotency_key.length > 0
+        ? body.idempotency_key
+        : null);
+    return raw === null ? null : `${domain}:${op}:${raw}`;
+  }
+
+  function parseShipReturnId(req: TenantRequest, res: Response): number | null {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return null;
+    }
+    return id;
+  }
+
+  app.post('/api/orders/:id/shipments', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = parseShipReturnId(req, res);
+    if (orderId === null) return;
+    try {
+      const outcome = runStockOp(actor, shipReturnKey(req, 'shipment', 'create'), () =>
+        createShipmentTx(db, actor, orderId, (req.body ?? {}) as { carrier?: unknown; destination?: unknown }),
+      );
+      if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+      else res.status(201).json(outcome.result);
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.post('/api/shipments/:id/status', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const shipmentId = parseShipReturnId(req, res);
+    if (shipmentId === null) return;
+    try {
+      const outcome = runStockOp(actor, shipReturnKey(req, 'shipment', 'update'), () =>
+        updateShipmentTx(db, actor, shipmentId, (req.body ?? {}) as { status?: unknown; reason?: unknown }),
+      );
+      if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+      else res.json(outcome.result);
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.get('/api/orders/:id/shipments', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = parseShipReturnId(req, res);
+    if (orderId === null) return;
+    try {
+      res.json({ shipments: getOrderShipments(db, actor, orderId) });
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.get('/api/shipments/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const shipmentId = parseShipReturnId(req, res);
+    if (shipmentId === null) return;
+    try {
+      res.json({ shipment: getShipment(db, actor, shipmentId) });
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.post('/api/orders/:id/returns', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = parseShipReturnId(req, res);
+    if (orderId === null) return;
+    try {
+      const outcome = runStockOp(actor, shipReturnKey(req, 'return', 'create'), () =>
+        createReturnTx(db, actor, orderId, (req.body ?? {}) as { items?: unknown; reason?: unknown }),
+      );
+      if (outcome.replayed) res.status(201).json({ ...outcome.result, replayed: true });
+      else res.status(201).json(outcome.result);
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  function reviewReturn(action: 'approved' | 'rejected') {
+    return (req: TenantRequest, res: Response): void => {
+      const actor = req.user as SessionUser;
+      const returnId = parseShipReturnId(req, res);
+      if (returnId === null) return;
+      try {
+        const outcome = runStockOp(actor, shipReturnKey(req, 'return', 'review'), () =>
+          reviewReturnTx(db, actor, returnId, action, (req.body ?? {}) as { reason?: unknown }),
+        );
+        if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+        else res.json(outcome.result);
+      } catch (err) {
+        shipReturnFail(res, err);
+      }
+    };
+  }
+
+  app.post('/api/returns/:id/approve', requireAuth, reviewReturn('approved'));
+  app.post('/api/returns/:id/reject', requireAuth, reviewReturn('rejected'));
+
+  app.post('/api/returns/:id/receive', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const returnId = parseShipReturnId(req, res);
+    if (returnId === null) return;
+    try {
+      const outcome = runStockOp(actor, shipReturnKey(req, 'return', 'receive'), () =>
+        receiveReturnTx(db, actor, returnId),
+      );
+      if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+      else res.json(outcome.result);
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.post('/api/returns/:id/refund', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const returnId = parseShipReturnId(req, res);
+    if (returnId === null) return;
+    try {
+      const outcome = runStockOp(actor, shipReturnKey(req, 'return', 'refund'), () =>
+        refundReturnTx(db, actor, returnId),
+      );
+      if (outcome.replayed) res.json({ ...outcome.result, replayed: true });
+      else res.json(outcome.result);
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.get('/api/orders/:id/returns', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const orderId = parseShipReturnId(req, res);
+    if (orderId === null) return;
+    try {
+      res.json({ returns: getOrderReturns(db, actor, orderId) });
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
+
+  app.get('/api/returns/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const returnId = parseShipReturnId(req, res);
+    if (returnId === null) return;
+    try {
+      res.json({ return: getReturn(db, actor, returnId) });
+    } catch (err) {
+      shipReturnFail(res, err);
+    }
+  });
 
   return app;
 }

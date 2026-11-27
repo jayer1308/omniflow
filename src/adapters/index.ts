@@ -103,12 +103,14 @@ export class FakeShippingAdapter implements ShippingAdapter {
   }
 
   /**
-   * Ma van don deterministic (GOAL-007) — STUB cho Tester: Worker dien
-   * logic that (digest PHAI co shipmentId, vi du
-   * `FAKE-TRK-<sha256(orderCode:carrier:shipmentId) 12 ky tu dau>`).
+   * Ma van don deterministic (GOAL-007, D24): `FAKE-TRK-<sha256
+   * (orderCode:carrier:shipmentId) 12 ky tu dau>`. Cung input -> cung ma;
+   * khac shipmentId -> khac ma (digest PHAI co shipment id, neu khong 2
+   * lan giao cung don cung carrier se trung tracking_code va UNIQUE chan
+   * nham lan giao hop le sau khi shipment cu failed/delivered).
    */
-  trackingRef(_orderCode: string, _carrier: string, _shipmentId: number): string {
-    throw new Error('not implemented');
+  trackingRef(orderCode: string, carrier: string, shipmentId: number): string {
+    return digest('FAKE-TRK', `${orderCode}:${carrier}:${shipmentId}`);
   }
 }
 

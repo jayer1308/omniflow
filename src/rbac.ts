@@ -83,7 +83,17 @@ export type Action =
   // (warehouseId) để gate phạm vi sales/warehouse.
   | 'create-payment'
   | 'refund-payment'
-  | 'view-payments';
+  | 'view-payments'
+  // GOAL-007: giao hàng / trả hàng (xem docs/RBAC.md, ma trận giao/trả).
+  // Phạm vi gate bằng branchId + warehouseId của đơn (kiểu Target đã có).
+  | 'request-shipment'
+  | 'update-shipment'
+  | 'view-shipments'
+  | 'request-return'
+  | 'review-return'
+  | 'receive-return'
+  | 'refund-return'
+  | 'view-returns';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
@@ -260,6 +270,48 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
         return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
       }
       return false;
+    }
+    // GOAL-007: ma trận giao/trả (docs/RBAC.md). Yêu cầu giao/cập nhật
+    // trạng thái giao: owner/manager toàn org, warehouse chỉ đơn có
+    // warehouse_id trong phạm vi, sales/accountant không được. Xem giao/
+    // trả: owner/manager/accountant toàn org, sales chỉ chi nhánh mình,
+    // warehouse chỉ kho mình. Yêu cầu trả: owner/manager toàn org, sales
+    // chỉ đơn thuộc chi nhánh mình, warehouse/accountant không được.
+    // Duyệt/từ chối trả: chỉ owner/manager. Nhận hàng trả: owner/manager
+    // toàn org, warehouse chỉ đơn có kho trong phạm vi. Hoàn tiền trả
+    // hàng: owner/manager/accountant toàn org.
+    case 'request-shipment':
+    case 'update-shipment': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'warehouse') return false;
+      return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+    }
+    case 'view-shipments':
+    case 'view-returns': {
+      if (actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant') {
+        return true;
+      }
+      if (actor.role === 'sales') return inScope(actor.branchId, targetBranch);
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return false;
+    }
+    case 'request-return': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'review-return': {
+      return actor.role === 'owner' || actor.role === 'manager';
+    }
+    case 'receive-return': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role !== 'warehouse') return false;
+      return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+    }
+    case 'refund-return': {
+      return actor.role === 'owner' || actor.role === 'manager' || actor.role === 'accountant';
     }
     default:
       return false;

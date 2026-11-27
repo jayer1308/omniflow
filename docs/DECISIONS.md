@@ -489,3 +489,102 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   webhook vừa thành rào cản chặn nhầm lần thu hợp lệ thứ hai.
 - Đổi khi: cổng thanh toán thật (ngoài phạm vi vĩnh viễn), hoặc cần giả
   lập thêm loại lỗi (thêm cờ tương tự, vẫn chỉ dùng trong test).
+
+## D24 — Mô hình giao hàng: state machine riêng, adapter mở rộng mã vận đơn deterministic (27/11/2026)
+
+- Quyết định (GOAL-007): shipment là dữ liệu cấp org gắn với đơn
+  (`shipments`: `org_id`/`order_id` NOT NULL FK, `carrier`/`destination`
+  NOT NULL, `tracking_code` TEXT NOT NULL UNIQUE, `fee` INTEGER >= 0,
+  `eta_days` INTEGER > 0, `status` CHECK `IN ('requested','in_transit',
+  'delivered','failed')` mặc định `'requested'`; `shipment_events`
+  append-only, chỉ INSERT). State machine riêng, KHÔNG động vào trạng
+  thái đơn GOAL-005 (đơn vẫn `completed`): `requested → in_transit →
+  delivered`, `requested`/`in_transit → failed` (thất bại là trạng thái
+  cuối — muốn giao lại thì tạo shipment mới). Chuyển sai thứ tự → 400,
+  không đổi gì, không ghi event. Gửi lại cùng trạng thái hiện tại → 200
+  no-op ở mức trạng thái: trả shipment hiện tại, KHÔNG tạo event mới,
+  KHÔNG ghi audit mới (khác webhook GOAL-006 ghi event cả bản trùng — ở
+  đây cập nhật lặp không phải bản trùng từ bên ngoài mà là cập nhật lặp).
+  Chỉ đơn `completed` mới được yêu cầu giao (hàng đã xuất kho ở GOAL-005);
+  mỗi đơn tối đa 1 shipment chưa cuối (`requested`/`in_transit`) — yêu
+  cầu thêm → 400. Không có endpoint DELETE shipment, không API sửa/xóa
+  `shipment_events` (gọi → 404).
+- `FakeShippingAdapter` mở rộng thêm `trackingRef(orderCode, carrier,
+  shipmentId)` trả `FAKE-TRK-<sha256(orderCode:carrier:shipmentId) 12 ký
+  tự đầu>`; digest PHẢI có shipment id — nếu chỉ digest theo mã đơn +
+  carrier thì 2 lần giao cùng đơn cùng carrier trùng `tracking_code` và
+  `UNIQUE` chặn nhầm lần giao hợp lệ sau khi shipment cũ `failed`/
+  `delivered`. `quote()` giữ nguyên (phí `15000 + số chặng 500g × 5000`,
+  ETA 1 ngày nếu đích Hà Nội, 2 ngày còn lại, `simulated: true`).
+  Khối lượng giao mặc định = tổng số lượng mặt hàng trong đơn × 500g
+  (sản phẩm chưa có trường cân nặng; không thêm trường cân nặng trong
+  goal này). Server insert shipment trước để lấy id rồi mới tính mã vận
+  đơn và cập nhật trong cùng transaction — không bao giờ lộ trạng thái
+  trung gian ra ngoài.
+- Lý do: hãng vận chuyển gửi cập nhật lặp/trễ/sai thứ tự là hành vi bình
+  thường — chỉ chống bằng kiểm tra trạng thái hiện tại trong cùng
+  transaction `BEGIN IMMEDIATE` + gửi lại cùng trạng thái là no-op không
+  ghi event thì mới không ghi nhận sai.
+- Đổi khi: đơn vị vận chuyển thật (ngoài phạm vi vĩnh viễn của dự án
+  giả lập), hoặc sản phẩm có trường cân nặng thật (thay 500g mặc định).
+
+## D25 — Mô hình trả hàng: vòng đời, nhập lại kho có chọn lọc, hoàn tiền dùng lại đường GOAL-006 (27/11/2026)
+
+- Quyết định (GOAL-007): return là dữ liệu cấp org gắn với đơn
+  (`returns`: `org_id`/`order_id` NOT NULL FK, `code` UNIQUE trong org
+  dạng `TH-YYYYMMDD-NNNN` — số thứ tự trong ngày theo từng org, tính
+  trong cùng transaction tạo yêu cầu, như mã đơn `DH-...` ở D19;
+  `reason` NOT NULL; `status` CHECK `IN ('requested','approved',
+  'rejected','received','refunded')`; `reviewed_by`/`received_by` FK
+  tới `users` NULL cho tới khi tới bước đó; `review_reason` NULL;
+  `return_items`: `UNIQUE(return_id, variant_id)`, `qty > 0`,
+  `condition` CHECK `IN ('resalable','damaged')`, `unit_price >= 0`
+  snapshot từ `order_items`; `return_events` append-only, chỉ INSERT).
+  Vòng đời: `requested → approved → received → refunded`;
+  `requested → rejected` (trạng thái cuối, bắt buộc có `review_reason`).
+  Mọi chuyển khác → 400, không đổi gì, không ghi event. Chỉ đơn
+  `completed` mới được yêu cầu trả; biến thể phải thuộc đơn; tổng trả
+  tích lũy mỗi biến thể (cộng MỌI yêu cầu trả chưa bị từ chối của đơn đó,
+  kể cả yêu cầu đang chờ duyệt — không chỉ yêu cầu đã nhận) không được
+  vượt số lượng đã đặt. Trả hàng KHÔNG đổi trạng thái đơn.
+- Nhận hàng (`approved → received`) + nhập lại kho trong CÙNG MỘT
+  transaction `BEGIN IMMEDIATE`: mặt hàng `resalable` nhập lại kho của
+  đơn bằng `applyMovement` loại `in` (`reference` = mã trả `TH-...`,
+  `reason` ghi rõ nhập lại từ trả hàng), 1 movement mỗi dòng bán lại
+  được; mặt hàng `damaged` KHÔNG nhập kho, KHÔNG ghi movement — chỉ ghi
+  nhận trong `return_items` + event detail (số lượng hỏng từng biến thể).
+  Bước nào lỗi thì rollback toàn bộ — không có trạng thái "đã nhận nhưng
+  chưa nhập kho". Không thêm loại movement mới (dùng lại `in` của D17).
+- Hoàn tiền trả hàng (`received → refunded`) dùng LẠI đúng đường GOAL-006
+  (`createRefundTx` ở `src/app.ts` + bảng `refunds`, không viết lại logic
+  hoàn): số tiền hoàn = tổng `unit_price × qty` trên mọi mặt hàng của yêu
+  cầu trả (CẢ bán lại được LẪN hỏng — khách trả hàng thì được hoàn tiền
+  bất kể tình trạng hàng, chỉ khác ở chỗ không nhập kho), tính từ snapshot
+  `order_items`, không tin client; hoàn vào các payment đã `paid` của đơn
+  theo thứ tự cũ nhất trước cho tới đủ số tiền, mỗi lần hoàn là một bản
+  ghi `refunds` riêng với `reason` là mã trả `TH-...`. Số tiền hoàn vượt
+  số còn hoàn được của đơn (đơn chưa trả đủ tiền, hoặc đã hoàn trước đó)
+  → 400, không tạo refund nào, yêu cầu trả ở lại `received` (kiểm tra
+  tổng hoàn được TRƯỚC khi gọi `createRefundTx` lần nào để không tạo
+  refund dở dang). Hoàn tiền cho trả hàng KHÔNG đổi trạng thái đơn.
+- Đối soát sau trả dùng lại `computePaymentSummary` (`src/payments.ts`,
+  D22): refund của trả hàng tự vào đối soát vì nằm trong bảng `refunds`.
+  Trạng thái đối soát thêm `partially_refunded` (GOAL-007): khi đơn có
+  yêu cầu trả đã hoàn tiền (`returns.status = 'refunded'`) mà vẫn còn
+  tiền ròng đã trả (`paid_total > 0`) thì `payment_status` là
+  `partially_refunded` — phân biệt với hoàn tiền trực tiếp GOAL-006,
+  vốn giữ `partially_paid` theo test khóa GOAL-006 (đơn draft, không có
+  return). Đây là sửa tối thiểu ở code cũ để hai bộ test khóa (GOAL-006
+  đòi `partially_paid`, GOAL-007 đòi `partially_refunded` cho cùng trạng
+  thái số học) cùng xanh; xem ghi chú trong `computePaymentSummary`.
+- Bảo vệ race chỉ có ý nghĩa trong một process (D1): app một tiến trình,
+  bảo vệ race chỉ có ý nghĩa trong một process; đa process ngoài phạm vi.
+  Test đồng thời chứng minh bất biến (chỉ 1 shipment/1 lần nhập kho/1 lần
+  hoàn), không chứng minh được đa process.
+- Lý do: đường hoàn GOAL-006 đã khóa tổng hoàn không vượt số đã trả —
+  viết lại sẽ lệch; tổng trả tích lũy phải tính cả yêu cầu chờ duyệt nếu
+  không 2 yêu cầu chờ duyệt cùng vượt số đặt sẽ cùng lọt; hàng hỏng vẫn
+  hoàn tiền vì khách đã trả hàng, chỉ không nhập kho.
+- Đổi khi: cổng thanh toán thật (ngoài phạm vi vĩnh viễn), hoặc cho phép
+  trả một phần tiền theo chính sách khác (ví dụ trừ phí) — khi đó số tiền
+  hoàn không còn bằng tổng snapshot nữa.

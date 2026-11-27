@@ -473,11 +473,128 @@ smoke() {
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE \
     "http://127.0.0.1:$port/api/payments/$pay1_id")"
   [ "$code" = "404" ] || { echo "DELETE payment tra ve HTTP $code, mong 404"; return 1; }
+  # Giao hang + tra hang (GOAL-007): tao don moi (2 bien the moi de ton
+  # sach) -> xac nhan -> xu ly -> hoan tat -> thu tien -> yeu cau giao
+  # (phi/ETA tu adapter, ma van don deterministic) -> idempotency gui lai
+  # -> cap nhat sai thu tu 400 -> in_transit -> lap cung trang thai khong
+  # tao event -> delivered -> yeu cau tra (1 ban lai duoc + 1 hong) ->
+  # duyet -> nhan (ton tang dung so ban lai duoc, hong khong nhap kho) ->
+  # hoan tien -> doi soat dung so -> RBAC 403 -> DELETE 404.
+  local g1_res g1_id g1v_res g1v_id g2_res g2_id g2v_res g2v_id
+  local gord gord_id ship_res ship_id ship_replay ship_events ret_res ret_id ret_code
+  local gpay glvl gmove gsum
+  g1_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-SMOKE-G1","name":"San pham giao 1","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  g1_id="$(echo "$g1_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  g1v_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-SMOKE-G1","name":"Bien the giao 1"}' \
+    "http://127.0.0.1:$port/api/products/$g1_id/variants")" || return 1
+  g1v_id="$(echo "$g1v_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  g2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-SMOKE-G2","name":"San pham giao 2","price":50000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  g2_id="$(echo "$g2_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  g2v_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-SMOKE-G2","name":"Bien the giao 2"}' \
+    "http://127.0.0.1:$port/api/products/$g2_id/variants")" || return 1
+  g2v_id="$(echo "$g2v_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$g1v_id,\"qty\":50,\"reason\":\"nhap giao smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/in" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$g2v_id,\"qty\":30,\"reason\":\"nhap giao smoke\"}" \
+    "http://127.0.0.1:$port/api/stock/in" >/dev/null || return 1
+  gord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$g1v_id,\"qty\":2},{\"variant_id\":$g2v_id,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$gord" | grep -q '"total":250000' || { echo "total don giao sai: $gord"; return 1; }
+  gord_id="$(echo "$gord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  # Don nhap khong giao duoc (400).
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"TP.HCM"}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/shipments")"
+  [ "$code" = "400" ] || { echo "don nhap yeu cau giao tra ve HTTP $code, mong 400"; return 1; }
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/complete" >/dev/null || return 1
+  gpay="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":250000}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/payments")" || return 1
+  echo "$gpay" | grep -q '"status":"paid"' || { echo "thu tien don giao tra ve: $gpay"; return 1; }
+  ship_res="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-ship-1' -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"Hà Nội"}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/shipments")" || return 1
+  echo "$ship_res" | grep -q '"status":"requested"' || { echo "yeu cau giao tra ve: $ship_res"; return 1; }
+  echo "$ship_res" | grep -q '"fee":30000' || { echo "phi giao sai (mong 3 mon x 500g -> 30000): $ship_res"; return 1; }
+  echo "$ship_res" | grep -q '"eta_days":1' || { echo "ETA Ha Noi sai (mong 1): $ship_res"; return 1; }
+  echo "$ship_res" | grep -qE '"tracking_code":"FAKE-TRK-[0-9A-F]{12}"' || { echo "ma van don sai dinh dang: $ship_res"; return 1; }
+  ship_id="$(echo "$ship_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).shipment.id))")"
+  ship_replay="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-ship-1' -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"Hà Nội"}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/shipments")" || return 1
+  echo "$ship_replay" | grep -q '"replayed":true' || { echo "gui lai giao khong replay: $ship_replay"; return 1; }
+  [ "$(sqlite3 "$tmpdir/smoke.db" "SELECT COUNT(*) FROM shipments WHERE order_id=$gord_id;")" = "1" ] || { echo "gui lai van tao them shipment"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"status":"delivered"}' \
+    "http://127.0.0.1:$port/api/shipments/$ship_id/status")"
+  [ "$code" = "400" ] || { echo "requested -> delivered tra ve HTTP $code, mong 400"; return 1; }
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{"status":"in_transit"}' \
+    "http://127.0.0.1:$port/api/shipments/$ship_id/status" | grep -q '"status":"in_transit"' || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{"status":"in_transit"}' \
+    "http://127.0.0.1:$port/api/shipments/$ship_id/status" | grep -q '"status":"in_transit"' || return 1
+  ship_events="$(sqlite3 "$tmpdir/smoke.db" "SELECT COUNT(*) FROM shipment_events WHERE shipment_id=$ship_id;")"
+  [ "$ship_events" = "2" ] || { echo "gui lap cung trang thai tao event thua, so event $ship_events, mong 2"; return 1; }
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{"status":"delivered"}' \
+    "http://127.0.0.1:$port/api/shipments/$ship_id/status" | grep -q '"status":"delivered"' || return 1
+  ret_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"items\":[{\"variant_id\":$g1v_id,\"qty\":1,\"condition\":\"resalable\"},{\"variant_id\":$g2v_id,\"qty\":1,\"condition\":\"damaged\"}],\"reason\":\"tra giao smoke\"}" \
+    "http://127.0.0.1:$port/api/orders/$gord_id/returns")" || return 1
+  echo "$ret_res" | grep -q '"status":"requested"' || { echo "yeu cau tra tra ve: $ret_res"; return 1; }
+  echo "$ret_res" | grep -qE '"code":"TH-[0-9]{8}-[0-9]{4}"' || { echo "ma tra sai dinh dang: $ret_res"; return 1; }
+  ret_id="$(echo "$ret_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).return.id))")"
+  ret_code="$(echo "$ret_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).return.code))")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/returns/$ret_id/approve" | grep -q '"status":"approved"' || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/returns/$ret_id/receive" | grep -q '"status":"received"' || return 1
+  glvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$wha_id&variant_id=$g1v_id")" || return 1
+  echo "$glvl" | grep -q '"on_hand":49' || { echo "nhan tra khong nhap lai dung so: $glvl"; return 1; }
+  glvl="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/stock/levels?warehouse_id=$wha_id&variant_id=$g2v_id")" || return 1
+  echo "$glvl" | grep -q '"on_hand":29' || { echo "hang hong lam doi ton: $glvl"; return 1; }
+  gmove="$(sqlite3 "$tmpdir/smoke.db" "SELECT COUNT(*) FROM stock_movements WHERE reference='$ret_code';")"
+  [ "$gmove" = "1" ] || { echo "so movement nhap lai $gmove, mong 1 (chi dong resalable)"; return 1; }
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/returns/$ret_id/refund" | grep -q '"status":"refunded"' || return 1
+  gsum="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/orders/$gord_id/payments")" || return 1
+  echo "$gsum" | grep -q '"paid_total":100000' || { echo "doi soat sau tra sai paid_total: $gsum"; return 1; }
+  echo "$gsum" | grep -q '"refunded_total":150000' || { echo "doi soat sau tra sai refunded_total: $gsum"; return 1; }
+  echo "$gsum" | grep -q '"payment_status":"partially_refunded"' || { echo "doi soat sau tra sai payment_status: $gsum"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"TP.HCM"}' \
+    "http://127.0.0.1:$port/api/orders/$gord_id/shipments")"
+  [ "$code" = "403" ] || { echo "sales yeu cau giao tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" -H 'Content-Type: application/json' \
+    -d "{\"items\":[{\"variant_id\":$g1v_id,\"qty\":1,\"condition\":\"resalable\"}],\"reason\":\"kho tra\"}" \
+    "http://127.0.0.1:$port/api/orders/$gord_id/returns")"
+  [ "$code" = "403" ] || { echo "warehouse yeu cau tra tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/returns/$ret_id/approve")"
+  [ "$code" = "403" ] || { echo "sales duyet tra tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE \
+    "http://127.0.0.1:$port/api/shipments/$ship_id")"
+  [ "$code" = "404" ] || { echo "DELETE shipment tra ve HTTP $code, mong 404"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE \
+    "http://127.0.0.1:$port/api/returns/$ret_id")"
+  [ "$code" = "404" ] || { echo "DELETE return tra ve HTTP $code, mong 404"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404)"
 }
 step "smoke server" smoke
 

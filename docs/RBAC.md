@@ -215,6 +215,61 @@ chi tiết (append-only, cũ nhất trước), `audit_log` là lớp ghi nhận 
 tác nhạy cảm — cả hai đều phải có, không thay nhau. Không có endpoint
 DELETE payment, không có API sửa/xóa lịch sử giao dịch.
 
+### Ma trận giao hàng + trả hàng (GOAL-007, D24/D25)
+
+Giao hàng/trả hàng là dữ liệu cấp org, gắn với đơn. Phạm vi gate bằng
+`branchId` + `warehouseId` của đơn (kiểu `Target` đã có — giống ma trận
+đơn/thanh toán). Helper `can()` mở rộng 8 actions:
+`request-shipment`, `update-shipment`, `view-shipments`,
+`request-return`, `review-return`, `receive-return`, `refund-return`,
+`view-returns`. Mọi endpoint giao/trả qua `requireAuth` + `can()`.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Yêu cầu giao (`POST /api/orders/:id/shipments`) | Được | Được | Không (403) | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Không (403) |
+| Cập nhật trạng thái giao (`POST /api/shipments/:id/status`) | Được | Được | Không (403) | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Không (403) |
+| Xem giao hàng (`GET /api/orders/:id/shipments`, `GET /api/shipments/:id`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh của mình | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Được, toàn org (chỉ xem) |
+| Yêu cầu trả (`POST /api/orders/:id/returns`) | Được | Được | Được (đơn thuộc chi nhánh của mình) | Không (403) | Không (403) |
+| Duyệt/từ chối trả (`POST /api/returns/:id/approve`, `/reject`) | Được | Được | Không (403) | Không (403) | Không (403) |
+| Nhận hàng trả (`POST /api/returns/:id/receive`) | Được | Được | Không (403) | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Không (403) |
+| Hoàn tiền trả hàng (`POST /api/returns/:id/refund`) | Được | Được | Không (403) | Không (403) | Được, toàn org |
+| Xem trả hàng (`GET /api/orders/:id/returns`, `GET /api/returns/:id`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh của mình | Được, chỉ đơn có `warehouse_id` trong phạm vi của mình | Được, toàn org (chỉ xem) |
+
+Ghi chú: `sales` xem shipment/return của đơn ngoài chi nhánh của mình →
+403; `warehouse` không được yêu cầu trả hay hoàn tiền trả hàng dù đúng kho
+→ 403; mọi vai xem shipment/return ngoài org → 403.
+
+### Endpoints mới (GOAL-007)
+
+| Endpoint | Vai trò |
+|---|---|
+| `POST /api/orders/:id/shipments` | owner / manager / warehouse (đơn có kho trong phạm vi mình); sales / accountant → 403 |
+| `POST /api/shipments/:id/status` | owner / manager / warehouse (đơn có kho trong phạm vi mình); sales / accountant → 403 |
+| `GET /api/orders/:id/shipments`, `GET /api/shipments/:id` | mọi vai, lọc theo phạm vi (sales: chi nhánh mình; warehouse: kho được gán; accountant: toàn org, chỉ xem) |
+| `POST /api/orders/:id/returns` | owner / manager / sales (đơn thuộc chi nhánh mình); warehouse / accountant → 403 |
+| `POST /api/returns/:id/approve`, `/reject` | owner / manager; sales / warehouse / accountant → 403 |
+| `POST /api/returns/:id/receive` | owner / manager / warehouse (đơn có kho trong phạm vi mình); sales / accountant → 403 |
+| `POST /api/returns/:id/refund` | owner / manager / accountant; sales / warehouse → 403 |
+| `GET /api/orders/:id/returns`, `GET /api/returns/:id` | mọi vai, lọc theo phạm vi (sales: chi nhánh mình; warehouse: kho được gán; accountant: toàn org, chỉ xem) |
+
+Audit log: mọi thao tác yêu cầu giao, cập nhật trạng thái giao, yêu cầu
+trả, duyệt/từ chối, nhận hàng, hoàn tiền trả hàng đều ghi `audit_log`
+(`action` `create-shipment`/`update-shipment`/`create-return`/
+`review-return`/`receive-return`/`refund-return`, `detail` JSON với
+`target_order_id`, `order_code`, `target_shipment_id`/
+`target_return_id`, `tracking_code`/`return_code`, `from_status`/
+`to_status`, KHÔNG chứa dữ liệu nhạy cảm, KHÔNG chứa thông tin thẻ).
+Xem log theo luật GOAL-002. `shipment_events`/`return_events` là lịch sử
+chi tiết (append-only, cũ nhất trước), `audit_log` là lớp ghi nhận thao
+tác nhạy cảm — cả hai đều phải có, không thay nhau. Không có endpoint
+DELETE shipment/return, không có API sửa/xóa lịch sử giao/trả (gọi →
+404). Idempotency: header `Idempotency-Key` hoặc `idempotency_key`
+trong body; tên miền key `shipment:create:<key>` /
+`shipment:update:<key>` / `return:create:<key>` /
+`return:review:<key>` / `return:receive:<key>` /
+`return:refund:<key>`; gửi lại trả đúng response cũ kèm
+`replayed: true`.
+
 ### Endpoints mới (GOAL-005)
 
 | Endpoint | Vai trò |

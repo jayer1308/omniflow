@@ -325,6 +325,67 @@ const MIGRATIONS: Migration[] = [
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );`,
   },
+  {
+    // GOAL-007: giao hang + tra hang (D24/D25). shipments cap org gan don
+    // (tracking_code UNIQUE toan cuc — deterministic theo shipment id nen
+    // khong trung giua 2 lan giao); shipment_events/return_events
+    // append-only (chi INSERT, khong API sua/xoa); returns ma TH-YYYYMMDD-
+    // NNNN UNIQUE trong org; return_items snapshot gia tu order_items,
+    // UNIQUE(return_id, variant_id).
+    version: 12,
+    sql: `CREATE TABLE IF NOT EXISTS shipments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      carrier TEXT NOT NULL,
+      tracking_code TEXT NOT NULL UNIQUE,
+      destination TEXT NOT NULL,
+      fee INTEGER NOT NULL CHECK (fee >= 0),
+      eta_days INTEGER NOT NULL CHECK (eta_days > 0),
+      status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'in_transit', 'delivered', 'failed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS shipment_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shipment_id INTEGER NOT NULL REFERENCES shipments(id),
+      event_type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id),
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS returns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id INTEGER NOT NULL REFERENCES orgs(id),
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      code TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'approved', 'rejected', 'received', 'refunded')),
+      reviewed_by INTEGER REFERENCES users(id),
+      received_by INTEGER REFERENCES users(id),
+      review_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (org_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS return_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id INTEGER NOT NULL REFERENCES returns(id),
+      variant_id INTEGER NOT NULL REFERENCES product_variants(id),
+      qty INTEGER NOT NULL CHECK (qty > 0),
+      condition TEXT NOT NULL CHECK (condition IN ('resalable', 'damaged')),
+      unit_price INTEGER NOT NULL CHECK (unit_price >= 0),
+      UNIQUE (return_id, variant_id)
+    );
+    CREATE TABLE IF NOT EXISTS return_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id INTEGER NOT NULL REFERENCES returns(id),
+      event_type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id),
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

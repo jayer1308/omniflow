@@ -25,9 +25,45 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng)
 ```
+
+## Giao hàng + trả hàng (GOAL-007)
+
+Chỉ đơn `completed` mới được giao/trả. Yêu cầu giao qua adapter fake
+(`FakeShippingAdapter.quote()` lấy phí/ETA theo khối lượng mặc định tổng
+số lượng × 500g; mã vận đơn deterministic `FAKE-TRK-<hash12>` theo
+`${orderCode}:${carrier}:${shipmentId}`, cùng shipment cùng mã, khác
+shipment khác mã); state machine giao riêng `requested → in_transit →
+delivered`, `requested`/`in_transit → failed` (thất bại là trạng thái
+cuối, muốn giao lại thì tạo shipment mới; mỗi đơn tối đa 1 shipment chưa
+cuối); gửi lại cùng trạng thái là no-op (200, không tạo event mới, không
+ghi audit mới), chuyển sai thứ tự → 400. Trả hàng `requested → approved
+→ received → refunded` / `requested → rejected` (từ chối bắt buộc có lý
+do); mã trả `TH-YYYYMMDD-NNNN`; tổng trả tích lũy mỗi biến thể tính cả
+yêu cầu đang chờ duyệt, không vượt số đã đặt; `unit_price` snapshot từ
+`order_items`. Nhận hàng nhập lại kho có chọn lọc trong cùng transaction
+(`resalable` nhập lại bằng movement `in`, `damaged` không nhập kho,
+không ghi movement). Hoàn tiền trả hàng dùng lại đúng đường GOAL-006
+(`createRefundTx` + bảng `refunds`, `reason` = mã trả, hoàn vào payment
+đã `paid` cũ nhất trước; vượt số còn hoàn được → 400, yêu cầu trả ở lại
+`received`); đối soát sau trả tính lại bằng `computePaymentSummary`
+(`paid_total` đã trừ refund, `payment_status` là `partially_refunded`
+khi đơn có yêu cầu trả đã hoàn tiền mà vẫn còn tiền ròng đã trả). Lịch
+sử giao/trả append-only (`shipment_events`/`return_events`, cũ nhất
+trước); RBAC giao/trả theo vai + phạm vi chi nhánh/kho của đơn; audit
+log mọi thao tác. KHÔNG lưu thông tin thẻ. Xem `docs/RBAC.md` (ma trận
+giao/trả) và `docs/DECISIONS.md` (D24, D25). Endpoint chính:
+`POST /api/orders/:id/shipments`, `POST /api/shipments/:id/status`,
+`GET /api/orders/:id/shipments`, `GET /api/shipments/:id`,
+`POST /api/orders/:id/returns`, `POST /api/returns/:id/approve|reject|
+receive|refund`, `GET /api/orders/:id/returns`, `GET /api/returns/:id`
+(không có DELETE shipment/return, không có API sửa/xóa lịch sử).
+Idempotency: header `Idempotency-Key` hoặc `idempotency_key` trong body,
+tên miền `shipment:create:<key>` / `shipment:update:<key>` /
+`return:create:<key>` / `return:review:<key>` / `return:receive:<key>` /
+`return:refund:<key>`, gửi lại trả `replayed: true`.
 
 ## Thanh toán + hoàn tiền (GOAL-006)
 

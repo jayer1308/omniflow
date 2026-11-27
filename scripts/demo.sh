@@ -652,6 +652,163 @@ thanh_toan_rbac() {
 }
 demo_step "thanh toan: warehouse tao payment bi 403, sales hoan tien bi 403, webhook sai chu ky bi 401" thanh_toan_rbac
 
+# Giao hang + tra hang (GOAL-007): tao don moi (2 bien the moi de ton
+# sach) -> xac nhan -> xu ly -> hoan tat -> thu tien -> yeu cau giao
+# (phi/ETA tu adapter, ma van don deterministic) -> idempotency gui lai
+# -> cap nhat sai thu tu 400 -> in_transit -> lap cung trang thai khong
+# tao event -> delivered -> yeu cau tra (1 ban lai duoc + 1 hong) -> duyet
+# -> nhan (ton tang dung so ban lai duoc, hong khong nhap kho) -> hoan
+# tien -> doi soat dung so -> RBAC 403 -> DELETE 404.
+GORD_FILE="$TMPDIR_DEMO/gord.txt"
+GSHIP_FILE="$TMPDIR_DEMO/gship.txt"
+GRET_FILE="$TMPDIR_DEMO/gret.txt"
+GRETCODE_FILE="$TMPDIR_DEMO/gretcode.txt"
+G1V_FILE="$TMPDIR_DEMO/g1v.txt"
+G2V_FILE="$TMPDIR_DEMO/g2v.txt"
+
+giao_tra_chuan_bi() {
+  local wha p1 v1 p2 v2 res id
+  wha="$(cat "$WHA_FILE")"
+  p1="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-DEMO-G1","name":"San pham giao 1","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  v1="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-DEMO-G1","name":"Bien the giao 1"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$p1/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  p2="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-DEMO-G2","name":"San pham giao 2","price":50000,"unit":"cai"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  v2="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-DEMO-G2","name":"Bien the giao 2"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$p2/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  echo "$v1" > "$G1V_FILE"
+  echo "$v2" > "$G2V_FILE"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$v1,\"qty\":50,\"reason\":\"nhap giao demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in" >/dev/null
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$v2,\"qty\":30,\"reason\":\"nhap giao demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in" >/dev/null
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$res" | grep -q '"total":250000' || { echo "total don giao sai: $res"; return 1; }
+  id="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  echo "$id" > "$GORD_FILE"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/confirm" | grep -q '"status":"confirmed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/process" | grep -q '"status":"processing"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":250000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments" | grep -q '"status":"paid"' || return 1
+}
+demo_step "giao/tra: tao don moi 250000 -> xac nhan -> xu ly -> hoan tat -> thu tien mat 250000" giao_tra_chuan_bi
+
+giao_tra_yeu_cau() {
+  local id res replay
+  id="$(cat "$GORD_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-ship-1' -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"Hà Nội"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/shipments")"
+  echo "$res" | grep -q '"status":"requested"' || { echo "yeu cau giao tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"fee":30000' || { echo "phi giao sai (mong 3 mon x 500g -> 30000): $res"; return 1; }
+  echo "$res" | grep -q '"eta_days":1' || { echo "ETA Ha Noi sai (mong 1): $res"; return 1; }
+  echo "$res" | grep -qE '"tracking_code":"FAKE-TRK-[0-9A-F]{12}"' || { echo "ma van don sai dinh dang: $res"; return 1; }
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).shipment.id))" > "$GSHIP_FILE"
+  replay="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-ship-1' -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"Hà Nội"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/shipments")"
+  echo "$replay" | grep -q '"replayed":true' || { echo "gui lai giao khong replay: $replay"; return 1; }
+  [ "$(sqlite3 "$OMNIFLOW_DB" "SELECT COUNT(*) FROM shipments WHERE order_id=$id;")" = "1" ] || { echo "gui lai van tao them shipment"; return 1; }
+}
+demo_step "giao/tra: yeu cau giao 201 requested, phi 30000/ETA 1 ngay Ha Noi, ma van don FAKE-TRK-..., gui lai replayed" giao_tra_yeu_cau
+
+giao_tra_trang_thai() {
+  local ship code events
+  ship="$(cat "$GSHIP_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"status":"delivered"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship/status")"
+  [ "$code" = "400" ] || { echo "requested -> delivered tra ve HTTP $code, mong 400"; return 1; }
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"status":"in_transit"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship/status" | grep -q '"status":"in_transit"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"status":"in_transit"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship/status" | grep -q '"status":"in_transit"' || return 1
+  events="$(sqlite3 "$OMNIFLOW_DB" "SELECT COUNT(*) FROM shipment_events WHERE shipment_id=$ship;")"
+  [ "$events" = "2" ] || { echo "gui lap cung trang thai tao event thua, so event $events, mong 2"; return 1; }
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"status":"delivered"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship/status" | grep -q '"status":"delivered"' || return 1
+}
+demo_step "giao/tra: sai thu tu 400, in_transit 200, lap cung trang thai khong tao event, delivered 200" giao_tra_trang_thai
+
+giao_tra_tra_hang() {
+  local id v1 v2 res ret lvl moves
+  id="$(cat "$GORD_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"items\":[{\"variant_id\":$v1,\"qty\":1,\"condition\":\"resalable\"},{\"variant_id\":$v2,\"qty\":1,\"condition\":\"damaged\"}],\"reason\":\"tra giao demo\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/returns")"
+  echo "$res" | grep -q '"status":"requested"' || { echo "yeu cau tra tra ve: $res"; return 1; }
+  echo "$res" | grep -qE '"code":"TH-[0-9]{8}-[0-9]{4}"' || { echo "ma tra sai dinh dang: $res"; return 1; }
+  ret="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).return.id))")"
+  echo "$ret" > "$GRET_FILE"
+  echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).return.code))" > "$GRETCODE_FILE"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/returns/$ret/approve" | grep -q '"status":"approved"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/returns/$ret/receive" | grep -q '"status":"received"' || return 1
+  lvl="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/levels?warehouse_id=$(cat "$WHA_FILE")&variant_id=$v1")"
+  echo "$lvl" | grep -q '"on_hand":49' || { echo "nhan tra khong nhap lai dung so: $lvl"; return 1; }
+  lvl="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/stock/levels?warehouse_id=$(cat "$WHA_FILE")&variant_id=$v2")"
+  echo "$lvl" | grep -q '"on_hand":29' || { echo "hang hong lam doi ton: $lvl"; return 1; }
+  moves="$(sqlite3 "$OMNIFLOW_DB" "SELECT COUNT(*) FROM stock_movements WHERE reference='$(cat "$GRETCODE_FILE")';")"
+  [ "$moves" = "1" ] || { echo "so movement nhap lai $moves, mong 1 (chi dong resalable)"; return 1; }
+}
+demo_step "giao/tra: yeu cau tra 201 ma TH-..., duyet -> nhan, ton tang dung so ban lai duoc, hong khong nhap kho" giao_tra_tra_hang
+
+giao_tra_hoan_doi_soat() {
+  local id ret res sum
+  id="$(cat "$GORD_FILE")"
+  ret="$(cat "$GRET_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/returns/$ret/refund")"
+  echo "$res" | grep -q '"status":"refunded"' || { echo "hoan tien tra tra ve: $res"; return 1; }
+  sum="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/orders/$id/payments")"
+  echo "$sum" | grep -q '"paid_total":100000' || { echo "doi soat sau tra sai paid_total: $sum"; return 1; }
+  echo "$sum" | grep -q '"refunded_total":150000' || { echo "doi soat sau tra sai refunded_total: $sum"; return 1; }
+  echo "$sum" | grep -q '"payment_status":"partially_refunded"' || { echo "doi soat sau tra sai payment_status: $sum"; return 1; }
+}
+demo_step "giao/tra: hoan tien tra 150000 -> refunded, doi soat paid_total 100000, refunded_total 150000, partially_refunded" giao_tra_hoan_doi_soat
+
+giao_tra_rbac() {
+  local id ret ship code
+  id="$(cat "$GORD_FILE")"
+  ret="$(cat "$GRET_FILE")"
+  ship="$(cat "$GSHIP_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"TP.HCM"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/shipments")"
+  [ "$code" = "403" ] || { echo "sales yeu cau giao tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"items\":[{\"variant_id\":$(cat "$G1V_FILE"),\"qty\":1,\"condition\":\"resalable\"}],\"reason\":\"kho tra\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$id/returns")"
+  [ "$code" = "403" ] || { echo "warehouse yeu cau tra tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/returns/$ret/approve")"
+  [ "$code" = "403" ] || { echo "sales duyet tra tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -X DELETE \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship")"
+  [ "$code" = "404" ] || { echo "DELETE shipment tra ve HTTP $code, mong 404"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -X DELETE \
+    "http://127.0.0.1:$PORT_DEMO/api/returns/$ret")"
+  [ "$code" = "404" ] || { echo "DELETE return tra ve HTTP $code, mong 404"; return 1; }
+}
+demo_step "giao/tra: sales yeu cau giao 403, warehouse yeu cau tra 403, sales duyet tra 403, DELETE 404" giao_tra_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -677,7 +834,8 @@ demo_step "backup tao file, restore dua du lieu ve dung trang thai" backup_resto
 
 docs_present() {
   [ -f docs/ROADMAP.md ] && [ -f docs/DECISIONS.md ] && [ -f docs/SETUP.md ] \
-    && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md
+    && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md \
+    && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md
 }
 demo_step "docs ROADMAP/DECISIONS/SETUP co mat" docs_present
 

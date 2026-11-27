@@ -128,6 +128,50 @@ nhất trước, `events` cũ nhất trước. Idempotency: header
 quyết định mô hình: `docs/DECISIONS.md` (D22, D23). KHÔNG lưu thông tin
 thẻ; không có DELETE payment, không có API sửa/xóa lịch sử giao dịch.
 
+## Giao hàng + trả hàng (GOAL-007)
+
+Giao hàng/trả hàng là dữ liệu cấp org, gắn với đơn; chỉ đơn `completed`
+mới được giao/trả (hàng đã xuất kho ở GOAL-005). Yêu cầu giao
+(`POST /api/orders/:id/shipments`, `{carrier, destination,
+idempotency_key?}`) trả 201 shipment `requested` với phí/ETA từ
+`FakeShippingAdapter.quote()` (khối lượng = tổng số lượng × 500g) +
+`tracking_code` deterministic `FAKE-TRK-<hash12>` theo
+`${orderCode}:${carrier}:${shipmentId}`; mỗi đơn tối đa 1 shipment chưa
+cuối (`requested`/`in_transit`). Cập nhật trạng thái
+(`POST /api/shipments/:id/status`, `{status: in_transit | delivered |
+failed, reason?, idempotency_key?}`): chỉ `requested → in_transit →
+delivered` và `requested`/`in_transit → failed` (thất bại là trạng thái
+cuối, bắt buộc có `reason`); gửi lại cùng trạng thái → 200 no-op, KHÔNG
+tạo event mới; chuyển sai thứ tự → 400. Yêu cầu trả
+(`POST /api/orders/:id/returns`, `{items: [{variant_id, qty, condition:
+resalable | damaged}], reason, idempotency_key?}`) trả 201 return
+`requested` mã `TH-YYYYMMDD-NNNN`, `unit_price` snapshot từ
+`order_items`; biến thể phải thuộc đơn, tổng trả tích lũy (cả yêu cầu
+đang chờ duyệt) không vượt số đã đặt. Duyệt/từ chối
+(`POST /api/returns/:id/approve|reject`, chỉ từ `requested`, từ chối bắt
+buộc có `reason`); nhận hàng (`POST /api/returns/:id/receive`, chỉ từ
+`approved`) nhập lại kho có chọn lọc trong cùng transaction: `resalable`
+nhập lại kho của đơn bằng movement `in` (`reference` = mã trả),
+`damaged` không nhập kho, không ghi movement; hoàn tiền
+(`POST /api/returns/:id/refund`, chỉ từ `received`) dùng lại đúng đường
+GOAL-006 (`createRefundTx` + bảng `refunds`, `reason` = mã trả, hoàn vào
+payment `paid` cũ nhất trước; vượt số còn hoàn được → 400, return ở lại
+`received`). Đọc (`GET /api/orders/:id/shipments`,
+`GET /api/shipments/:id`, `GET /api/orders/:id/returns`,
+`GET /api/returns/:id`) kèm `events`/`items` (mới nhất trước, `events`
+cũ nhất trước). Đối chiếu sau trả: `GET /api/orders/:id/payments` hiển
+thị đúng `paid_total` đã trừ refund (`payment_status`
+`partially_refunded` khi đơn có yêu cầu trả đã hoàn tiền mà vẫn còn tiền
+ròng đã trả — xem D25), `GET /api/stock/levels` hiển thị `on_hand` tăng
+đúng số bán lại được. Idempotency: header `Idempotency-Key` hoặc
+`idempotency_key` trong body, tên miền `shipment:create:<key>` /
+`shipment:update:<key>` / `return:create:<key>` /
+`return:review:<key>` / `return:receive:<key>` /
+`return:refund:<key>`, gửi lại trả `replayed: true`. Ma trận quyền
+giao/trả đầy đủ: `docs/RBAC.md`; quyết định mô hình:
+`docs/DECISIONS.md` (D24, D25). KHÔNG lưu thông tin thẻ; không có
+DELETE shipment/return, không có API sửa/xóa lịch sử giao/trả.
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
