@@ -1,0 +1,65 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/payments-acceptance.test.ts::AC-1 migration 011 tao du 3 bang thanh toan + cot + UNIQUE/CHECK, giu du lieu cu",
+      "tests/payments-acceptance.test.ts::AC-1 thu tien mat 201 paid ngay + event paid + audit log + order_summary",
+      "tests/payments-acceptance.test.ts::AC-1 thu chuyen khoan 201 paid ngay, don draft van thu duoc",
+      "tests/payments-acceptance.test.ts::AC-1 thu qua cong 201 requested + gateway_reference duy nhat; 2 don cung amount khac reference",
+      "tests/payments-acceptance.test.ts::AC-1 FakePaymentAdapter.charge nhan ma giao dich: khac giao dich khac reference, cung giao dich cung reference",
+      "tests/payments-acceptance.test.ts::AC-1 FakePaymentAdapter.refund tra FAKE-REF- deterministic theo giao dich + so tien",
+      "tests/payments-acceptance.test.ts::AC-1 FakePaymentAdapter.failNext chi dung trong test: lan charge ke tiep failed, sau do lai success",
+      "tests/payments-acceptance.test.ts::AC-1 signWebhook truc tiep: sha256 cua reference:status:amount:secret",
+      "tests/payments-acceptance.test.ts::AC-1 computePaymentSummary truc tiep: tong don/tong tra/tong hoan/con thieu/trang thai",
+      "tests/payments-acceptance.test.ts::AC-1 idempotency tao payment: gui lai cung key tra cung payment + replayed true, khong tao moi",
+      "tests/payments-acceptance.test.ts::AC-1 tao payment sai dau vao 400, don khong ton tai 404, don da huy 400, ngoai org 403"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/payments-acceptance.test.ts::AC-2 webhook paid chot requested thanh paid + event paid + audit log",
+      "tests/payments-acceptance.test.ts::AC-2 webhook paid gui lap: 200 + duplicate true, khong doi gi, ghi event trung, tong chi tinh 1 lan",
+      "tests/payments-acceptance.test.ts::AC-2 webhook dong thoi 2 paid cung reference: chi 1 lan chot, lan con lai duplicate true",
+      "tests/payments-acceptance.test.ts::AC-2 webhook failed sau paid bi bo qua: 200, van paid, ghi event, khong doi paid thanh failed",
+      "tests/payments-acceptance.test.ts::AC-2 webhook sai thu tu: failed truoc roi paid sau van chot binh thuong",
+      "tests/payments-acceptance.test.ts::AC-2 webhook failed cho requested: payment failed + event failed + audit log",
+      "tests/payments-acceptance.test.ts::AC-2 webhook sai/thieu chu ky 401; webhook khong can session dang nhap",
+      "tests/payments-acceptance.test.ts::AC-2 webhook reference khong ton tai 404, amount khac 400, khong chot sai so",
+      "tests/payments-acceptance.test.ts::AC-2 thieu secret webhook: endpoint tra 503, server van chay route khac"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/payments-acceptance.test.ts::AC-3 hoan mot phan 201 refund completed + payment partially_refunded + event + audit + summary",
+      "tests/payments-acceptance.test.ts::AC-3 hoan du: payment refunded, paid_total ve 0, outstanding ve bang order_total",
+      "tests/payments-acceptance.test.ts::AC-3 hoan vuot so da tra 400, khong tao refund nao",
+      "tests/payments-acceptance.test.ts::AC-3 hoan sai: payment chua paid 400, reason trong 400, amount <= 0 400, payment khong ton tai 404",
+      "tests/payments-acceptance.test.ts::AC-3 hoan dong thoi 2 lan vuot so da tra: chi 1 lan thanh cong, lan con lai 400",
+      "tests/payments-acceptance.test.ts::AC-3 idempotency hoan tien: gui lai cung key replayed true, khong tao refund moi",
+      "tests/payments-acceptance.test.ts::AC-3 doi soat dung so hoc: unpaid, partially_paid, paid, overpaid hien ro so thua",
+      "tests/payments-acceptance.test.ts::AC-3 luong day du: gateway paid -> hoan mot phan -> hoan not, status chuyen dung, events cu nhat truoc",
+      "tests/payments-acceptance.test.ts::AC-3 payment_events append-only: PATCH/DELETE lich su 404/405 va lich su van nguyen"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/payments-acceptance.test.ts::AC-4 can() 3 actions thanh toan theo ma tran (src/rbac.ts)",
+      "tests/payments-acceptance.test.ts::AC-4 RBAC 403 qua HTTP: warehouse tao payment, sales hoan tien, accountant/manager/sales dung chi nhanh duoc",
+      "tests/payments-acceptance.test.ts::AC-4 RBAC xem 403: sales ngoai chi nhanh, warehouse ngoai kho gan, user org A doc payment org B",
+      "tests/payments-acceptance.test.ts::AC-4 audit log thanh toan: tao/webhook/hoan deu ghi, webhook user_id NULL + ghi ro webhook, sales xem log 403",
+      "tests/payments-acceptance.test.ts::AC-4 khong co field the/CVV trong DB, API hay log",
+      "tests/payments-acceptance.test.ts::AC-4 khong co endpoint DELETE payment: DELETE 404/405 va payment van doc duoc"
+    ]
+  }
+]

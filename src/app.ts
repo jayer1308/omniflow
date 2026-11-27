@@ -2993,5 +2993,23 @@ export function createApp(db: DatabaseSync): Express {
   app.post('/api/orders/:id/complete', requireAuth, orderTransition('complete'));
   app.post('/api/orders/:id/cancel', requireAuth, orderTransition('cancel'));
 
+  // ---------- Thanh toan + hoan tien (GOAL-006) — STUB cho Tester ----------
+  // Worker thay bang logic that: hien tai moi endpoint payment tra 501
+  // "not implemented" de test acceptance DO dung ly do. Route DELETE payment
+  // / sua-xoa lich su payment cung la stub 501 (khong phai 404) de test
+  // "khong co endpoint" DO tren stub va xanh khi Worker bo route di.
+  // Webhook KHONG qua requireAuth (xac thuc bang chu ky gia lap, xem brief).
+  const paymentNotImplemented = (_req: TenantRequest, res: Response): void => {
+    res.status(501).json({ error: 'not implemented', code: 'not_implemented' });
+  };
+  app.post('/api/orders/:id/payments', paymentNotImplemented);
+  app.post('/api/payments/webhook', paymentNotImplemented);
+  app.post('/api/payments/:id/refunds', paymentNotImplemented);
+  app.get('/api/orders/:id/payments', paymentNotImplemented);
+  app.get('/api/payments/:id', paymentNotImplemented);
+  app.delete('/api/payments/:id', paymentNotImplemented);
+  app.patch('/api/payments/:id/events/:eventId', paymentNotImplemented);
+  app.delete('/api/payments/:id/events/:eventId', paymentNotImplemented);
+
   return app;
 }
