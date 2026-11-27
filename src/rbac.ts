@@ -409,28 +409,6 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       if (targetBranch === null) return true;
       return inScope(actor.branchId, targetBranch);
     }
-    // GOAL-010: ma tran bao cao (docs/RBAC.md, D28). Xem/xuat bao cao:
-    // owner/manager/accountant toan org; sales chi chi nhanh minh
-    // (target.branchId NULL = chua chi chi nhanh cu the: route phai loc
-    // ve chi nhanh cua sales truoc khi goi can()); warehouse chi bao cao
-    // ton kho duoc gan (target.warehouseId NULL = chua chi kho cu the:
-    // route tu loc ve kho duoc gan; chi co route stock moi goi can() voi
-    // vai warehouse — cac bao cao khac route chan 403 truoc).
-    case 'view-reports':
-    case 'export-reports': {
-      if (
-        actor.role === 'owner' ||
-        actor.role === 'manager' ||
-        actor.role === 'accountant'
-      ) {
-        return true;
-      }
-      if (actor.role === 'sales') return inScope(actor.branchId, targetBranch);
-      if (actor.role === 'warehouse') {
-        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
-      }
-      return false;
-    }
     default:
       return false;
   }
