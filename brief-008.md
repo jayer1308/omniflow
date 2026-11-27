@@ -94,6 +94,39 @@ R-20 sạch ngay từ lúc `goal create` — đó là hành vi đúng của cơ 
 trừ); nếu inbox vẫn còn notice R-16 thì đó là lỗi cần điều tra, không
 được giấu.
 
+## Loại trừ R-17 (GOAL-006) có lý do
+
+Khi rà soát `apos plan`, phát hiện thêm yêu cầu R-17 của GOAL-006 (source
+`brief-006.md`, sha256
+`d3721a8812fccf7a526b1aebe77d2422a5001c1990065724601563c638fc6eb1`) đang ở
+trạng thái `deferred` sang GOAL-008. Nếu GOAL-008 đóng mà không adopt hay
+loại trừ nó, R-17 sẽ thành notice mồ côi ở inbox giống hệt R-16/R-20
+trước đây. Quyết định (coordinator, 27/11, theo đúng pattern R-16/R-20):
+**LOẠI TRỪ R-17 CÓ LÝ DO, KHÔNG adopt vào GOAL-008**.
+
+R-17 nguyên văn (GOAL-006, `brief-006.md` dòng 327–328):
+
+> Khách hàng + CRM (GOAL-008): không có bảng khách hàng, không lưu phương
+> thức thanh toán của khách, không lịch sử thanh toán theo khách.
+
+Lý do loại trừ: R-17 chỉ là câu phủ định phạm vi của GOAL-006 (nói GOAL-006
+không làm CRM), không phải một yêu cầu dương cần implement. Toàn bộ phạm vi
+CRM mà nó nhắc tới đã được sở hữu bởi requirements riêng R-1..R-15 của
+GOAL-008 (hồ sơ khách, lịch sử mua, điểm, ghi chú, phân khúc); không còn
+yêu cầu nào chưa được sở hữu. Adopt R-17 vào GOAL-008 sẽ nhận sai phạm vi
+(nhận một câu phủ định làm tiêu chí) nên loại trừ có lý do.
+
+Cơ chế APOS như R-16 ở trên. `goal-008.json` khai entry này với `id`
+`"R-22"` (không dùng `"R-17"` vì GOAL-008 đã có requirement riêng mang id
+R-17 — khuyến mãi defer sang GOAL-009; key của entry adopt là
+`sourceSha256` brief-008 + id riêng, không đụng key của R-17 gốc), `adopts`
+`{"sourceSha256": "d3721a8812fccf7a526b1aebe77d2422a5001c1990065724601563c638fc6eb1",
+"requirementId": "R-17"}`, `disposition: "excluded"`, `exclusion:
+{"kind": "out-of-scope"}`, `exclusionReason` như đoạn lý do ở trên, `text`
+nguyên văn R-17. Entry này KHÔNG nằm trong `acceptance[].requirementIds`
+của bất kỳ AC nào. Sau `goal revise`, `apos plan` phải hiển thị R-17 của
+brief-006 out-of-scope GOAL-008 và `apos inbox` phải sạch.
+
 ## Kết quả mong muốn
 
 Cuối goal, một nhân viên bán hàng đăng nhập vào hệ thống có thể tạo hồ sơ
