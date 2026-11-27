@@ -770,3 +770,163 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
 - Đổi khi: cho phép gỡ/đổi mã trên đơn nháp (thêm endpoint gỡ mã + hoàn
   lượt dùng), mã dùng nhiều lần trên cùng đơn, hoặc khuyến mãi theo
   nhóm sản phẩm (hiện chỉ theo tổng đơn).
+
+## D28 — Mô hình báo cáo + đối soát (GOAL-010, 27/11/2026)
+
+- Định nghĩa chỉ số (tiền số nguyên đồng, không float): doanh thu chỉ
+  tính đơn có `status = 'completed'` tại thời điểm báo cáo; thời gian
+  của một đơn là thời điểm hoàn tất — `created_at` của `order_events`
+  có `to_status = 'completed'` (lưu UTC, không có cột `completed_at`
+  riêng, không thêm cột mới). Đơn `draft`/`confirmed`/`processing`/
+  `cancelled` KHÔNG vào doanh thu, kể cả đơn đã thu tiền đặt cọc (tiền
+  thu của đơn chưa completed không cộng vào doanh thu). Đơn completed
+  rồi bị trả hàng vẫn tính doanh thu gộp — tiền hoàn trừ riêng ở cột
+  hoàn tiền, không sửa lại doanh thu. Doanh thu gộp = Σ `orders.total`
+  (snapshot GOAL-005) của đơn completed trong kỳ; doanh thu thuần = Σ
+  (`total` − `points_discount` − `promo_discount`); số đơn = số đơn
+  completed trong kỳ; tiền đã thu = Σ `paid_total`, tiền hoàn = Σ
+  `refunded_total`, tiền còn phải thu = Σ `outstanding` — cả ba theo
+  `computePaymentSummary` (D22/D27) của từng đơn completed trong kỳ,
+  tính THEO ĐƠN, không theo ngày thu (âm nghĩa là thừa, hiện rõ không
+  giấu). Khoảng thời gian `from`/`to` là ngày theo Asia/Ho_Chi_Minh
+  (`YYYY-MM-DD`), chuyển sang UTC để lọc (`from` 00:00 +07 = hôm trước
+  17:00 UTC, `to` 00:00 +07 của ngày sau `to` là cận trên, khoảng nửa
+  mở `[startUtc, endUtc)`); mặc định là tháng hiện tại (ngày 1 tới hôm
+  nay, theo Asia/Ho_Chi_Minh); `from` > `to` → 400, định dạng ngày sai
+  → 400. Lọc ngày trong SQL bằng `datetime(created_at)` để chuẩn hóa
+  cả hai dạng timestamp đang có trong DB (ISO `...T...Z` và
+  `YYYY-MM-DD HH:MM:SS` UTC); nhóm theo ngày/tháng dùng ngày hoàn tất
+  theo Asia/Ho_Chi_Minh (đơn hoàn tất 00:30 +07 ngày 1 thuộc ngày 1).
+- Nhóm doanh thu (`group_by` ∈ `day`/`month`/`channel`/`branch`/
+  `product`/`category`, mặc định `day`; lạ → 400; kênh lạ → 400; chi
+  nhánh không tồn tại → 404, ngoài org → 403; kỳ rỗng → totals 0, rows
+  rỗng, 200): nhóm `product` dùng `order_items` (mỗi dòng tính theo
+  `line_total` snapshot); nhóm `category` gom theo danh mục của sản
+  phẩm, sản phẩm chưa có danh mục gom vào nhóm `Chưa phân loại`.
+  Công thức phân bổ điểm/mã/đã thu/hoàn cho một dòng sản phẩm: phần
+  của dòng = `floor(line_total × số giảm của đơn / total)`; phần dư
+  (do làm tròn xuống) chia +1đ cho các dòng có phần lẻ lớn nhất, để
+  tổng các dòng khớp đúng `points_discount`/`promo_discount`/
+  `paid_total`/`refunded_total` của đơn (hàm thuần
+  `allocateDiscounts` cho một dòng, `allocateProportional` cho cả đơn
+  trong `src/reports.ts`). `outstanding` của dòng = `gross − điểm −
+  mã − đã thu`, nên tổng các dòng khớp `outstanding_total`.
+  `order_count` ở nhóm `product`/`category` là số đơn khác nhau của
+  mỗi dòng — một đơn có nhiều dòng sản phẩm thì đếm ở nhiều dòng, nên
+  tổng `order_count` các dòng có thể vượt `totals.order_count` (chỉ
+  riêng cột này; các cột tiền vẫn khớp totals).
+- Báo cáo tồn kho: `levels` theo từng cặp (biến thể, kho) từ
+  `stock_levels` (`available = on_hand − reserved`, D17), `movements`
+  tóm tắt theo loại `{type, count, qty_total}` trong kỳ (lọc theo
+  `created_at` UTC, `qty_total` = Σ `qty_change`, có dấu), `low_stock`
+  = các cặp có `available < products.min_stock` kèm `min_stock` và
+  `shortage = min_stock − available`. Kho `inactive` vẫn hiện trong
+  báo cáo (chỉ đọc). Lọc kho/biến thể không tồn tại → 404, ngoài org
+  → 403.
+- Đối soát 3 mặt (chỉ đọc, không sửa dữ liệu): (a) kho — với mỗi cặp
+  (biến thể, kho) có ÍT NHẤT 1 movement: tồn kỳ vọng = Σ `qty_change`,
+  giữ kỳ vọng = Σ `reserved_change` của MỌI movement của cặp đó từ
+  đầu (không chỉ trong kỳ), so với `stock_levels` hiện tại (thiếu
+  dòng = 0); lệch → 1 dòng `kind: 'stock-level'`, `severity: 'error'`.
+  Cặp seed chỉ có `stock_levels` mà không có movement nào (seed tạo
+  mức tồn mẫu không ghi movement, để test backup/restore không vỡ FK)
+  KHÔNG tính là lệch — mức seed là baseline, chỉ kiểm tra cặp có
+  movement. Tinh chỉnh (demo.sh phát hiện 27/11): cặp seed SAU ĐÓ có
+  movement (vd demo GOAL-005 bán biến thể seed SKU-SEED-01-M ở Kho Phụ:
+  seed 20, reserve/out −2 → tồn 18) thì Σ thuần (−2) báo lệch SAI;
+  baseline của cặp phải cộng vào kỳ vọng: baseline = `on_hand_after −
+  qty_change` của movement ĐẦU TIÊN của cặp (mọi movement đều ghi mức
+  sau khi áp dụng, `stock_movements.on_hand_after/reserved_after`), kỳ
+  vọng = baseline + Σ mọi movement. Cặp bắt đầu từ 0 thì baseline = 0,
+  công thức rút gọn về Σ thuần (test khóa 'chen lech ton' vẫn assert
+  expected = Σ = 200). Tương tự cho `reserved`: baseline =
+  `reserved_after − reserved_change` của movement đầu tiên. (b) đơn–kho — với mỗi đơn completed trong kỳ: mỗi dòng
+  `order_items` phải có movement `out` (`reference` = mã đơn,
+  `qty_change` = −số lượng dòng, đúng kho của đơn) kèm movement
+  `release` tương ứng (`reserved_change` = −số lượng, D19: hoàn tất =
+  release + out trong cùng transaction); thiếu/thừa/sai số → 1 dòng
+  `kind: 'order-stock'`, `severity: 'error'`, kèm `order_code`,
+  `variant_id`, `expected_qty` (âm, = −số lượng kỳ vọng xuất),
+  `actual_qty`. (c) đơn–tiền — dùng lại `computePaymentSummary`
+  (D22/D27): `outstanding > 0` → 1 dòng `kind: 'order-payment'`,
+  `severity: 'info'`, `note` chứa `chưa thu đủ`; `outstanding < 0` →
+  `note` chứa `thu thừa`; đây là TRẠNG THÁI, không phải lỗi dữ liệu.
+  `payment_status = 'refunded'` mà `refunded_total` lệch tổng refund
+  `completed` → dòng `severity: 'error'` (kiểm tra này hiện không bao
+  giờ nổ vì `computePaymentSummary` tính `refunded_total` bằng đúng
+  tổng đó — giữ lại như chốt chặn). Dòng `order-payment` ghi cả
+  `expected` = số phải thu ròng (`total − points_discount −
+  promo_discount`), `actual` = `paid_total`, `difference` = `actual −
+  expected`, và `payment_status` trong `note` để người đọc tự thấy sự
+  khác biệt.
+- `payment_status` GIỮ NGUYÊN logic D22 (GOAL-010 KHÔNG đổi ngữ
+  nghĩa): đơn đổi điểm/mã hết tổng mà chưa trả đồng nào vẫn `unpaid`;
+  hoàn trực tiếp một phần giữ `partially_paid`, hoàn qua trả hàng giữ
+  `partially_refunded` (chỉ khi có return đã hoàn tiền — D25). Ngữ
+  nghĩa này có thể gây nhầm trong báo cáo (đơn trả đủ phần còn phải
+  trả sau giảm nhưng chưa bằng tổng gốc vẫn `partially_paid`) — báo
+  cáo hiển thị cả `outstanding` lẫn `payment_status`; muốn đổi thì làm
+  `tests revise` ở goal sau, không đổi lén trong goal này.
+- Báo cáo khuyến mãi: theo từng mã — `used_count`/`released_count`
+  đếm theo trạng thái HIỆN TẠI của usage tạo trong kỳ,
+  `total_discount` = Σ `discount_amount` của usage `used` tạo trong
+  kỳ (theo `created_at` của usage), `order_count` = số đơn khác nhau
+  có usage trong kỳ; lọc `code` theo chuỗi con; mã chưa từng dùng
+  trong kỳ vẫn hiện với các số 0. Báo cáo điểm: `earned_total`/`redeemed_total`
+  = Σ điểm `earn`/`redeem` trong kỳ từ ledger `customer_points`,
+  `redeemed_amount` = `redeemed_total` × 100đ (D26); điểm tích tính
+  trên tổng gốc (D27: không trừ `promo_discount`).
+- Xuất CSV (`?format=csv`, `format` lạ → 400): cùng dữ liệu với bản
+  JSON cùng filter (cùng `from`/`to`/filter, cùng kỳ), dùng
+  `csv-stringify` như GOAL-003 (BOM đầu file, tự quote trường chứa
+  dấu phẩy); cột đúng như brief R-7; dòng `TOTAL` cuối file cho báo
+  cáo doanh thu/khuyến mãi/điểm (khớp `totals` của JSON); báo cáo tồn
+  và đối soát không có dòng `TOTAL` (mỗi dòng là một cặp/một lệch).
+  CSV tồn kho thêm `min_stock`/`shortage` cho từng cặp (lấy từ
+  `products.min_stock`, `shortage = max(0, min_stock − available)`).
+- RBAC báo cáo: `can()` mở rộng 2 actions `view-reports` (xem JSON)
+  và `export-reports` (xuất CSV) — owner/manager/accountant toàn org
+  (chỉ xem, báo cáo chỉ đọc); sales chỉ chi nhánh mình (không có
+  `branch_id` thì mặc định lọc chi nhánh mình, `branch_id` khác →
+  403, xem báo cáo tồn → 403); warehouse chỉ xem báo cáo tồn kho
+  (`GET /api/reports/stock`, chỉ kho được gán — `warehouse_id` NULL =
+  mọi kho, hỏi kho ngoài phạm vi → 403), các báo cáo khác → 403. Mọi
+  endpoint báo cáo qua `requireRole` + `can()` (vai sai → 403, ngoài
+  org → 403, sai chi nhánh/kho → 403). Phạm vi org: hệ thống chạy
+  local cho một doanh nghiệp (seed tạo đúng 1 org, D9); các hàm thuần
+  báo cáo tổng hợp dữ liệu của org triển khai đó (org có id nhỏ nhất
+  — org seed), nên user thuộc org khác đọc báo cáo mặc định bị 403
+  (ma trận R-8: "user org A đọc báo cáo org B → 403"); hỏi chi
+  nhánh/kho thuộc org khác cũng 403 (qua lookup `branch_id`/
+  `warehouse_id`/`variant_id` trước khi tính).
+- Audit log: CHỈ xuất CSV mới ghi `audit_log` (action
+  `export-report`, `detail` JSON `{report ∈ revenue/stock/
+  reconciliation/promotions/points, from, to, format: 'csv', filter
+  đã dùng: channel/branch_id/warehouse_id/variant_id/code/group_by
+  khi có}`, KHÔNG chứa thông tin thẻ, KHÔNG chứa PII khách — chỉ id
+  + số liệu); xem JSON không ghi audit (tránh nhiễu log). Xem log theo
+  luật GOAL-002 (`GET /api/audit-log`: owner toàn org, manager trong
+  phạm vi, các vai khác → 403).
+- Không bảng tổng riêng: mọi số liệu tính ở service (`src/reports.ts`,
+  hàm thuần) từ các bảng đã có, KHÔNG tạo bảng tổng hợp mới, KHÔNG lưu
+  cột tổng riêng, KHÔNG migration 015 (không cần index mới cho truy
+  vấn báo cáo ở quy mô này), KHÔNG cache kết quả trong DB hay file
+  (mỗi lần gọi tính lại từ dữ liệu gốc). Báo cáo không yêu cầu
+  idempotency (GET hai lần trả cùng kết quả, không ghi gì thêm khi xem
+  JSON).
+- Lý do: thời điểm hoàn tất lấy từ `order_events` thay vì thêm cột
+  `completed_at` để không sửa schema GOAL-005 và giữ một nguồn sự
+  thật duy nhất cho vòng đời đơn; tiền thu/hoàn tính theo đơn (không
+  theo ngày thu) để khớp đúng định nghĩa đối soát D22; đối soát kho
+  dùng Σ movement từ đầu (không chỉ trong kỳ) vì `count` đặt lại tuyệt
+  đối và `transfer` có 2 phía — chỉ Σ toàn bộ mới cho kỳ vọng đúng;
+  cộng baseline từ movement đầu tiên vì mức seed tồn tại trước khi có
+  movement (xem tinh chỉnh mặt (a) ở trên).
+  cặp seed không movement được loại khỏi mặt (a) để dữ liệu mẫu đã
+  biết cho 0 dòng `error`; audit chỉ cho CSV để log không bị nhiễu
+  bởi lượt xem JSON.
+- Đổi khi: cần báo cáo theo thời gian thực trên dữ liệu lớn (thêm
+  index qua migration chỉ thêm index, hoặc bảng tổng hợp — phải qua
+  goal riêng và ghi rõ lý do), hoặc đổi ngữ nghĩa `payment_status`
+  (qua `tests revise`), hoặc báo cáo đa org thật (thêm `org_id` vào
+  các hàm thuần thay vì gate org triển khai).

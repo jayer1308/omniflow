@@ -912,11 +912,89 @@ smoke() {
   [ "$code" = "403" ] || { echo "sales ap ma ngoai chi nhanh tra ve HTTP $code, mong 403"; return 1; }
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" "http://127.0.0.1:$port/api/promotions")"
   [ "$code" = "403" ] || { echo "warehouse xem ma tra ve HTTP $code, mong 403"; return 1; }
+  # Bao cao + doi soat (GOAL-010): tao chi nhanh + manager rieng de so
+  # lieu bao cao tach biet khoi cac buoc truoc (don 250000d kenh counter
+  # -> hoan tat -> thu 100000d; don draft 50000d thu dat coc 20000d +
+  # don da huy khong vao doanh thu: gross 250000d, so don 1, paid
+  # 100000d, outstanding 150000d) -> bao cao theo kenh counter khop so
+  # -> doi soat 3 mat: mismatch error 0 -> bao cao khuyen mai + diem ->
+  # xuat CSV doanh thu khop JSON + audit export-report -> RBAC 403.
+  local mgr_pass mgr_res mgr_cookie rep_branch rep_branch_id
+  local from_m to_m rep_ord rep_ord_id rep_draft rep_draft_id rep_can rep_can_id
+  local rev rev_ch recon promo_rep points_rep csv_rev audit_rep
+  mgr_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  mgr_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"manager-bc-smoke@example.local\",\"password\":\"$mgr_pass\",\"role\":\"manager\"}" \
+    "http://127.0.0.1:$port/api/users/invite")" || return 1
+  echo "$mgr_res" | grep -q '"role":"manager"' || { echo "moi manager tra ve: $mgr_res"; return 1; }
+  mgr_cookie="$tmpdir/mgr-cookie.txt"
+  curl -fsS -c "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"manager-bc-smoke@example.local\",\"password\":\"$mgr_pass\"}" \
+    "http://127.0.0.1:$port/login" >/dev/null || return 1
+  rep_branch="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Chi nhanh Bao cao"}' "http://127.0.0.1:$port/api/branches")" || return 1
+  rep_branch_id="$(echo "$rep_branch" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  from_m="$(node -e "const f=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'});console.log(f.format(new Date()).slice(0,7)+'-01')")"
+  to_m="$(node -e "const f=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'});console.log(f.format(new Date()))")"
+  rep_ord="$(curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"branch_id\":$rep_branch_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2},{\"variant_id\":$crm_p2v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$rep_ord" | grep -q '"total":250000' || { echo "total don bao cao sai: $rep_ord"; return 1; }
+  rep_ord_id="$(echo "$rep_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$rep_ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$rep_ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$rep_ord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$port/api/orders/$rep_ord_id/payments" | grep -q '"status":"paid"' || return 1
+  rep_draft="$(curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"branch_id\":$rep_branch_id,\"items\":[{\"variant_id\":$crm_p2v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$rep_draft" | grep -q '"total":50000' || { echo "total don draft sai: $rep_draft"; return 1; }
+  rep_draft_id="$(echo "$rep_draft" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":20000}' \
+    "http://127.0.0.1:$port/api/orders/$rep_draft_id/payments" | grep -q '"status":"paid"' || return 1
+  rep_can="$(curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"branch_id\":$rep_branch_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  rep_can_id="$(echo "$rep_can" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$mgr_cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$rep_can_id/cancel" | grep -q '"status":"cancelled"' || return 1
+  rev="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$rep_branch_id&group_by=day")" || return 1
+  echo "$rev" | grep -q '"gross_revenue":250000' || { echo "doanh thu gop sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"order_count":1' || { echo "so don sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"paid_total":100000' || { echo "tien da thu sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"outstanding_total":150000' || { echo "con phai thu sai: $rev"; return 1; }
+  rev_ch="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$rep_branch_id&group_by=channel")" || return 1
+  echo "$rev_ch" | grep -q '"key":"counter"' || { echo "bao cao theo kenh thieu counter: $rev_ch"; return 1; }
+  echo "$rev_ch" | grep -q '"gross_revenue":250000' || { echo "bao cao theo kenh sai so: $rev_ch"; return 1; }
+  recon="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/reconciliation?from=$from_m&to=$to_m&branch_id=$rep_branch_id")" || return 1
+  [ "$(echo "$recon" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log(b.mismatches.filter(m=>m.severity==='error').length)})")" = "0" ] || { echo "doi soat co dong error: $recon"; return 1; }
+  promo_rep="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/promotions?from=$from_m&to=$to_m")" || return 1
+  echo "$promo_rep" | grep -q '"code":"KM10"' || { echo "bao cao khuyen mai thieu KM10: $promo_rep"; return 1; }
+  points_rep="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/points?from=$from_m&to=$to_m")" || return 1
+  echo "$points_rep" | grep -q '"earned_total"' || { echo "bao cao diem sai: $points_rep"; return 1; }
+  csv_rev="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$rep_branch_id&group_by=channel&format=csv")" || return 1
+  echo "$csv_rev" | grep -q 'key,label,gross_revenue' || { echo "CSV doanh thu thieu header: $csv_rev"; return 1; }
+  echo "$csv_rev" | grep -q 'TOTAL' || { echo "CSV doanh thu thieu dong TOTAL"; return 1; }
+  echo "$csv_rev" | grep -q '250000' || { echo "CSV doanh thu sai so: $csv_rev"; return 1; }
+  audit_rep="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/audit-log")" || return 1
+  echo "$audit_rep" | grep -q '"action":"export-report"' || { echo "audit log thieu export-report"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/reports/revenue?branch_id=$rep_branch_id")"
+  [ "$code" = "403" ] || { echo "sales xem doanh thu chi nhanh khac tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" "http://127.0.0.1:$port/api/reports/revenue")"
+  [ "$code" = "403" ] || { echo "warehouse xem doanh thu tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/reports/stock")"
+  [ "$code" = "403" ] || { echo "sales xem bao cao ton tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404) + khuyen mai (tao ma 10% cap 20000, trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400, ap ma het han 400, ap ma sai kenh 400, doi diem tren don co ma + thu tien outstanding 129000, huy don hoan luot dung + ap lai duoc, idempotency gui lai replayed + used_count 2, RBAC 403 warehouse tao ma / sales ap ma ngoai chi nhanh / warehouse xem ma)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404) + khuyen mai (tao ma 10% cap 20000, trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400, ap ma het han 400, ap ma sai kenh 400, doi diem tren don co ma + thu tien outstanding 129000, huy don hoan luot dung + ap lai duoc, idempotency gui lai replayed + used_count 2, RBAC 403 warehouse tao ma / sales ap ma ngoai chi nhanh / warehouse xem ma) + bao cao/doi soat (don 250000 hoan tat thu 100000, draft/huy khong vao doanh thu: gross 250000, so don 1, paid 100000, outstanding 150000; kenh counter khop so; doi soat error 0; bao cao khuyen mai + diem; CSV khop JSON + audit export-report; RBAC 403 sales xem doanh thu chi nhanh khac / warehouse xem doanh thu / sales xem bao cao ton)"
 }
 step "smoke server" smoke
 

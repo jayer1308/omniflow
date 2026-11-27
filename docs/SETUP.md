@@ -285,6 +285,85 @@ khuyến mãi đầy đủ: `docs/RBAC.md`; quyết định mô hình:
 `docs/DECISIONS.md` (D27). KHÔNG lưu thông tin thẻ; không thêm màn hình
 khuyến mãi (GOAL-012).
 
+## Báo cáo + đối soát (GOAL-010)
+
+Báo cáo chỉ đọc, tính ở service (`src/reports.ts`, hàm thuần) từ các
+bảng đã có — KHÔNG tạo bảng tổng hợp mới, KHÔNG lưu cột tổng riêng,
+KHÔNG migration 015, KHÔNG cache (mỗi lần gọi tính lại từ dữ liệu
+gốc). Doanh thu chỉ tính đơn `completed`: thời gian đơn là `created_at`
+của `order_events` có `to_status = 'completed'` (lưu UTC, không có cột
+`completed_at` riêng); `from`/`to` là ngày theo Asia/Ho_Chi_Minh
+(`YYYY-MM-DD`), chuyển sang UTC để lọc (`from` 00:00 +07 = hôm trước
+17:00 UTC), mặc định tháng hiện tại; `from` > `to` → 400, định dạng
+ngày sai → 400. Chỉ số: doanh thu gộp = Σ `orders.total`, doanh thu
+thuần = Σ (`total` − `points_discount` − `promo_discount`), số đơn =
+số đơn completed trong kỳ; tiền đã thu = Σ `paid_total`, tiền hoàn = Σ
+`refunded_total`, còn phải thu = Σ `outstanding` — cả ba theo
+`computePaymentSummary` của từng đơn completed trong kỳ (tính theo
+đơn, không theo ngày thu); đơn draft đã thu đặt cọc và đơn đã hủy
+KHÔNG vào doanh thu; đơn completed bị trả hàng vẫn tính doanh thu gộp,
+tiền hoàn ở cột riêng. `GET /api/reports/revenue?from=&to=&channel=
+&branch_id=&group_by=` (`channel` ∈ `counter`/`web`/`api`, lạ → 400;
+`group_by` ∈ `day`/`month`/`channel`/`branch`/`product`/`category`,
+mặc định `day`, lạ → 400; chi nhánh không tồn tại → 404, ngoài org →
+403; kỳ rỗng → totals 0, rows rỗng, 200) trả `{from, to, timezone:
+'Asia/Ho_Chi_Minh', totals: {gross_revenue, net_revenue, order_count,
+paid_total, refunded_total, outstanding_total, points_discount_total,
+promo_discount_total}, rows: [...]}` — totals bằng tổng các rows (riêng
+`order_count` ở nhóm `product`/`category` là số đơn khác nhau mỗi
+dòng). Nhóm `product` dùng `order_items` (`line_total` snapshot,
+điểm/mã/đã thu/hoàn phân bổ theo tỉ lệ `line_total`/`total`: làm tròn
+xuống từng dòng rồi chia phần dư cho dòng có phần lẻ lớn nhất, tổng các
+dòng khớp totals); nhóm `category` gom sản phẩm chưa có danh mục vào
+`Chưa phân loại`; nhóm `day`/`month` dùng ngày hoàn tất theo
+Asia/Ho_Chi_Minh. Báo cáo tồn (`GET /api/reports/stock?warehouse_id=
+&variant_id=&from=&to=`) trả `levels` theo từng cặp (biến thể, kho)
+`{variant_id, sku, product_name, warehouse_id, warehouse_name,
+on_hand, reserved, available}` (`available = on_hand − reserved`),
+`movements` tóm tắt theo loại `{type, count, qty_total}` trong kỳ,
+`low_stock` = các cặp `available < products.min_stock` kèm `min_stock`
+và `shortage`; kho `inactive` vẫn hiện; lọc kho/biến thể không tồn tại
+→ 404, ngoài org → 403. Đối soát (`GET /api/reports/reconciliation?
+from=&to=&branch_id=`) trả `{from, to, timezone, summary:
+{checked_orders, checked_stock_pairs, mismatch_count}, mismatches:
+[...]}` theo 3 mặt, chỉ đọc: (a) kho — tồn kỳ vọng = Σ `qty_change` /
+Σ `reserved_change` của MỌI movement của cặp từ đầu so với
+`stock_levels` hiện tại (cặp seed chỉ có `stock_levels` mà không có
+movement nào KHÔNG tính là lệch); lệch → `kind: 'stock-level'`,
+`severity: 'error'`; (b) đơn–kho — mỗi dòng `order_items` của đơn
+completed trong kỳ phải có movement `out` (`reference` = mã đơn,
+`qty_change` = −số lượng) kèm `release` tương ứng; thiếu/thừa/sai số →
+`kind: 'order-stock'`, `severity: 'error'`; (c) đơn–tiền — dùng lại
+`computePaymentSummary`: `outstanding > 0` → `kind: 'order-payment'`,
+`severity: 'info'`, `note` chứa `chưa thu đủ`; `outstanding < 0` →
+`note` chứa `thu thừa`; `payment_status = 'refunded'` mà
+`refunded_total` lệch tổng refund `completed` → `severity: 'error'`.
+`payment_status` GIỮ NGUYÊN logic D22 (đơn đổi điểm/mã hết tổng mà chưa
+trả đồng nào vẫn `unpaid`; hoàn trực tiếp một phần giữ
+`partially_paid`, hoàn qua trả hàng giữ `partially_refunded` — D25);
+báo cáo hiển thị cả `outstanding` lẫn `payment_status` trong `note`
+của dòng đối soát. Báo cáo khuyến mãi (`GET /api/reports/promotions?
+from=&to=&code=`) trả theo từng mã `{code, promotion_id, used_count,
+released_count, total_discount, order_count}` (`used`/`released` đếm
+theo trạng thái hiện tại của usage tạo trong kỳ; `total_discount` = Σ
+`discount_amount` của usage `used` tạo trong kỳ; `order_count` = số đơn
+khác nhau có usage trong kỳ; lọc `code` theo chuỗi con; mã chưa dùng
+trong kỳ vẫn hiện với các số 0). Báo cáo điểm (`GET /api/reports/points?
+from=&to=`) trả `{totals: {earned_total, redeemed_total,
+redeemed_amount}, rows: [{customer_id, customer_name, earned, redeemed,
+redeemed_amount}]}` (`redeemed_amount` = điểm đổi × 100đ, D26; điểm
+tích tính trên tổng gốc, D27). Xuất CSV: mọi endpoint báo cáo nhận thêm
+`?format=csv` (trả `Content-Type: text/csv; charset=utf-8`, BOM đầu
+file, `csv-stringify` tự quote trường chứa dấu phẩy; `format` lạ →
+400), cùng dữ liệu với bản JSON cùng filter; cột đúng như brief R-7;
+dòng `TOTAL` cuối file cho doanh thu/khuyến mãi/điểm (khớp `totals`
+JSON); tồn kho và đối soát không có dòng `TOTAL`. Audit log: CHỈ xuất
+CSV mới ghi `audit_log` (action `export-report`, `detail` JSON
+`{report, from, to, format: 'csv', filter đã dùng}` — KHÔNG chứa thông
+tin thẻ, KHÔNG chứa PII khách); xem JSON không ghi audit. RBAC báo cáo
+đầy đủ: `docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D28).
+KHÔNG lưu thông tin thẻ; không thêm màn hình báo cáo (GOAL-012).
+
 ## Kho đa kho + tồn (GOAL-004)
 
 Kho là dữ liệu cấp org (không gắn bắt buộc vào chi nhánh); tồn theo biến
@@ -336,6 +415,7 @@ Dừng server trước khi restore file DB đang chạy.
   trạng thái (giữ/giải phóng/xuất kho qua `applyMovement`, idempotency
   trong transaction)
 - `src/rbac.ts` — helper phân quyền `can()` + ma trận vai × thao tác × phạm vi
+- `src/reports.ts` — báo cáo + đối soát (GOAL-010, D28): hàm thuần tính từ bảng đã có, không bảng tổng riêng
 - `src/products.ts` — giá hiệu dụng fallback 8 bước + parse CSV (GOAL-003)
 - `src/seed.ts` — seed giả lập tối thiểu
 - `src/auth.ts` — bcrypt + session

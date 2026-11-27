@@ -357,6 +357,49 @@ hiện khi lọc theo một chi nhánh cụ thể.
 | `GET /api/promotions`, `GET /api/promotions/:id` | owner / manager / accountant toàn org, sales chỉ mã `branch_id` NULL hoặc đúng chi nhánh mình; warehouse → 403 |
 | `POST /api/orders/:id/promotion` | owner / manager toàn org, sales chỉ đơn thuộc chi nhánh mình; warehouse / accountant → 403 |
 
+### Ma trận quyền báo cáo + đối soát (GOAL-010, D28)
+
+Báo cáo là dữ liệu chỉ đọc, tính ở service từ các bảng đã có (không
+bảng tổng riêng, không migration 015). Helper `can()` mở rộng 2
+actions: `view-reports` (xem báo cáo JSON) và `export-reports` (xuất
+CSV). Mọi endpoint báo cáo qua `requireRole` + `can()`; ngoài ra route
+gate thêm theo loại báo cáo (warehouse chỉ báo cáo tồn, sales không xem
+báo cáo tồn) và theo org triển khai (user thuộc org khác đọc báo cáo
+mặc định → 403).
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Xem doanh thu / đối soát / khuyến mãi / điểm (`GET /api/reports/revenue`, `/reconciliation`, `/promotions`, `/points`) | Được, toàn org | Được, toàn org | Được, chỉ chi nhánh mình (không có `branch_id` thì mặc định lọc chi nhánh mình; `branch_id` khác → 403) | Không (403) | Được, toàn org (chỉ xem) |
+| Xem tồn kho (`GET /api/reports/stock`) | Được, toàn org | Được, toàn org | Không (403) | Được, chỉ kho được gán (`warehouse_id` NULL = mọi kho; hỏi kho ngoài phạm vi → 403) | Được, toàn org (chỉ xem) |
+| Xuất CSV các báo cáo trên (`?format=csv`) | Được, toàn org | Được, toàn org | Được, đúng phạm vi xem của mình | Được, chỉ báo cáo tồn kho trong phạm vi | Được, toàn org |
+
+Ghi chú: `sales` xem doanh thu chi nhánh khác → 403; `sales` xem báo
+cáo tồn → 403; `warehouse` xem doanh thu/đối soát/khuyến mãi/điểm →
+403; `warehouse` xem tồn kho ngoài phạm vi → 403; user org A đọc báo
+cáo org B → 403 (hỏi `branch_id`/`warehouse_id`/`variant_id` thuộc org
+khác → 403; gọi báo cáo mặc định khi thuộc org khác → 403); lọc theo
+kho/biến thể không tồn tại → 404; `format` lạ → 400.
+
+### Endpoints mới (GOAL-010)
+
+| Endpoint | Vai trò |
+|---|---|
+| `GET /api/reports/revenue?from=&to=&channel=&branch_id=&group_by=` | owner / manager / accountant toàn org, sales chỉ chi nhánh mình; warehouse → 403 |
+| `GET /api/reports/stock?warehouse_id=&variant_id=&from=&to=` | owner / manager / accountant toàn org, warehouse chỉ kho được gán; sales → 403 |
+| `GET /api/reports/reconciliation?from=&to=&branch_id=` | owner / manager / accountant toàn org, sales chỉ chi nhánh mình; warehouse → 403 |
+| `GET /api/reports/promotions?from=&to=&code=` | owner / manager / accountant toàn org, sales chỉ chi nhánh mình; warehouse → 403 |
+| `GET /api/reports/points?from=&to=` | owner / manager / accountant toàn org, sales chỉ chi nhánh mình; warehouse → 403 |
+| Mọi endpoint trên + `?format=csv` | cùng phạm vi xem như JSON; xuất CSV ghi audit log `export-report` |
+
+Audit log: CHỈ xuất CSV mới ghi `audit_log` (action `export-report`,
+`detail` JSON `{report, from, to, format: 'csv', filter đã dùng:
+channel/branch_id/warehouse_id/variant_id/code/group_by khi có}`,
+KHÔNG chứa thông tin thẻ, KHÔNG chứa PII khách — chỉ id + số liệu);
+xem báo cáo JSON không ghi audit (tránh nhiễu log). Xem log theo luật
+GOAL-002 (`GET /api/audit-log`: owner toàn org, manager trong phạm vi,
+các vai khác → 403). Không có API sửa/xóa báo cáo (báo cáo chỉ đọc, gọi
+POST/DELETE → 404); không thêm màn hình báo cáo (GOAL-012).
+
 Audit log: mọi thao tác tạo/sửa/khóa mã, áp mã, hoàn lượt dùng khi hủy
 đơn đều ghi `audit_log` (`action` `create-promotion` /
 `update-promotion` / `apply-promotion` / `promotion-usage-released`,

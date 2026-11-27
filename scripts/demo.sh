@@ -1194,6 +1194,103 @@ promo_rbac() {
 }
 demo_step "khuyen mai: warehouse tao ma 403, sales ap ma ngoai chi nhanh 403, warehouse xem ma 403" promo_rbac
 
+# Bao cao + doi soat (GOAL-010): tao chi nhanh + manager rieng de so lieu
+# bao cao tach biet khoi cac buoc truoc (don 250000d counter -> hoan tat
+# -> thu 100000d; don draft 50000d thu dat coc 20000d + don da huy khong
+# vao doanh thu: gross 250000d, so don 1, paid 100000d, outstanding
+# 150000d) -> bao cao theo kenh counter khop so -> doi soat 3 mat:
+# mismatch error 0 -> xuat CSV doanh thu khop JSON + audit export-report
+# -> RBAC 403 (sales xem doanh thu chi nhanh khac, warehouse xem doanh
+# thu, sales xem bao cao ton).
+REPORT_BRANCH_FILE="$TMPDIR_DEMO/report-branch.txt"
+REPORT_MGR_COOKIE="$TMPDIR_DEMO/report-mgr-cookie.txt"
+REPORT_RANGE_FILE="$TMPDIR_DEMO/report-range.txt"
+
+report_chuan_bi_chi_nhanh_va_manager() {
+  local pass res branch
+  pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"manager-bc-demo@example.local\",\"password\":\"$pass\",\"role\":\"manager\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite")"
+  echo "$res" | grep -q '"role":"manager"' || { echo "moi manager tra ve: $res"; return 1; }
+  curl -fsS -c "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"manager-bc-demo@example.local\",\"password\":\"$pass\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" >/dev/null || return 1
+  branch="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Chi nhanh Bao cao"}' "http://127.0.0.1:$PORT_DEMO/api/branches")"
+  echo "$branch" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))" > "$REPORT_BRANCH_FILE"
+}
+demo_step "bao cao: moi manager toan org, tao chi nhanh Bao cao rieng" report_chuan_bi_chi_nhanh_va_manager
+
+report_doanh_thu_chi_tinh_completed() {
+  local wha v1 v2 branch from_m to_m ord ord_id draft draft_id can can_id rev
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  branch="$(cat "$REPORT_BRANCH_FILE")"
+  from_m="$(node -e "const f=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'});console.log(f.format(new Date()).slice(0,7)+'-01')")"
+  to_m="$(node -e "const f=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'});console.log(f.format(new Date()))")"
+  echo "$from_m $to_m" > "$REPORT_RANGE_FILE"
+  ord="$(curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"branch_id\":$branch,\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$ord" | grep -q '"total":250000' || { echo "total don bao cao sai: $ord"; return 1; }
+  ord_id="$(echo "$ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/payments" | grep -q '"status":"paid"' || return 1
+  draft="$(curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"branch_id\":$branch,\"items\":[{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$draft" | grep -q '"total":50000' || { echo "total don draft sai: $draft"; return 1; }
+  draft_id="$(echo "$draft" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":20000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$draft_id/payments" | grep -q '"status":"paid"' || return 1
+  can="$(curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"branch_id\":$branch,\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  can_id="$(echo "$can" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$REPORT_MGR_COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$can_id/cancel" | grep -q '"status":"cancelled"' || return 1
+  rev="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$branch&group_by=day")"
+  echo "$rev" | grep -q '"gross_revenue":250000' || { echo "doanh thu gop sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"order_count":1' || { echo "so don sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"paid_total":100000' || { echo "tien da thu sai: $rev"; return 1; }
+  echo "$rev" | grep -q '"outstanding_total":150000' || { echo "con phai thu sai: $rev"; return 1; }
+}
+demo_step "bao cao: don 250000 hoan tat thu 100000 -> gross 250000, so don 1, paid 100000, outstanding 150000 (draft/huy khong vao)" report_doanh_thu_chi_tinh_completed
+
+report_doi_soat_csv_rbac() {
+  local branch from_m to_m rev_ch recon csv audit code
+  branch="$(cat "$REPORT_BRANCH_FILE")"
+  read -r from_m to_m < "$REPORT_RANGE_FILE"
+  rev_ch="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$branch&group_by=channel")"
+  echo "$rev_ch" | grep -q '"key":"counter"' || { echo "bao cao theo kenh thieu counter: $rev_ch"; return 1; }
+  echo "$rev_ch" | grep -q '"gross_revenue":250000' || { echo "bao cao theo kenh sai so: $rev_ch"; return 1; }
+  recon="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/reconciliation?from=$from_m&to=$to_m&branch_id=$branch")"
+  [ "$(echo "$recon" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log(b.mismatches.filter(m=>m.severity==='error').length)})")" = "0" ] || { echo "doi soat co dong error: $recon"; return 1; }
+  csv="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue?from=$from_m&to=$to_m&branch_id=$branch&group_by=channel&format=csv")"
+  echo "$csv" | grep -q 'key,label,gross_revenue' || { echo "CSV doanh thu thieu header"; return 1; }
+  echo "$csv" | grep -q 'TOTAL' || { echo "CSV doanh thu thieu dong TOTAL"; return 1; }
+  echo "$csv" | grep -q '250000' || { echo "CSV doanh thu sai so"; return 1; }
+  audit="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/audit-log")"
+  echo "$audit" | grep -q '"action":"export-report"' || { echo "audit log thieu export-report"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$SALES2_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue?branch_id=$branch")"
+  [ "$code" = "403" ] || { echo "sales xem doanh thu chi nhanh khac tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue")"
+  [ "$code" = "403" ] || { echo "warehouse xem doanh thu tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$SALES2_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/stock")"
+  [ "$code" = "403" ] || { echo "sales xem bao cao ton tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "bao cao: kenh counter khop 250000, doi soat error 0, CSV khop JSON + audit export-report, RBAC 403" report_doi_soat_csv_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -1222,7 +1319,9 @@ docs_present() {
     && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md \
     && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md \
     && grep -q 'D26' docs/DECISIONS.md && grep -q 'D27' docs/DECISIONS.md \
-    && grep -q 'create-customer' docs/RBAC.md && grep -q 'create-promotion' docs/RBAC.md
+    && grep -q 'D28' docs/DECISIONS.md \
+    && grep -q 'create-customer' docs/RBAC.md && grep -q 'create-promotion' docs/RBAC.md \
+    && grep -q 'view-reports' docs/RBAC.md
 }
 demo_step "docs ROADMAP/DECISIONS/SETUP co mat" docs_present
 

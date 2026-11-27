@@ -25,8 +25,8 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát)
 ```
 
 ## Giao hàng + trả hàng (GOAL-007)
@@ -203,6 +203,37 @@ Xem `docs/RBAC.md` (ma trận khuyến mãi) và `docs/DECISIONS.md` (D27).
 Endpoint chính: `POST/PATCH/GET /api/promotions`,
 `GET /api/promotions/:id` (kèm `used_count`, `usage_limit`,
 `per_customer_limit`), `POST /api/orders/:id/promotion`.
+
+## Báo cáo + đối soát (GOAL-010)
+
+Báo cáo chỉ đọc, tính ở service từ dữ liệu thật đã có (không bảng tổng
+riêng, không migration 015, không cache). Doanh thu chỉ tính đơn
+`completed` (thời gian đơn = thời điểm hoàn tất từ `order_events`
+`to_status='completed'`, hiển thị Asia/Ho_Chi_Minh; đơn draft đã thu
+đặt cọc và đơn đã hủy không vào doanh thu; đơn completed bị trả hàng
+vẫn tính doanh thu gộp, tiền hoàn ở cột riêng); tiền đã thu/hoàn/còn
+phải thu tính theo đơn qua `computePaymentSummary` (D22/D27). Nhóm
+doanh thu theo ngày/tháng/kênh/chi nhánh/sản phẩm/danh mục (sản phẩm
+chưa có danh mục gom vào `Chưa phân loại`); điểm/mã/đã thu/hoàn phân bổ
+cho dòng sản phẩm theo tỉ lệ `line_total`/`total` (làm tròn xuống rồi
+chia phần dư cho dòng có phần lẻ lớn nhất, tổng các dòng khớp totals).
+Đối soát 3 mặt kho–đơn–thanh toán: tồn kỳ vọng = Σ `qty_change` /
+`reserved_change` của MỌI movement từ đầu so với `stock_levels` (cặp
+seed không movement không tính là lệch); mỗi dòng đơn completed phải có
+movement `out` + `release` tương ứng; `outstanding > 0` là trạng thái
+`chưa thu đủ`, `< 0` là `thu thừa` (severity `info`, không phải lỗi).
+`payment_status` giữ nguyên logic D22. Báo cáo khuyến mãi đã dùng +
+điểm đã đổi (`redeemed_amount` = điểm đổi × 100đ). Xuất CSV cho mỗi báo
+cáo (`?format=csv`, số liệu khớp JSON cùng filter, dòng `TOTAL` cuối
+file cho doanh thu/khuyến mãi/điểm); chỉ xuất CSV mới ghi audit log
+(`export-report`), xem JSON không ghi. RBAC báo cáo: owner/manager/
+accountant toàn org (chỉ xem); sales chỉ chi nhánh mình (xem báo cáo
+tồn → 403); warehouse chỉ báo cáo tồn kho được gán (các báo cáo khác →
+403). Xem `docs/RBAC.md` (ma trận báo cáo) và `docs/DECISIONS.md`
+(D28). Endpoint chính: `GET /api/reports/revenue`,
+`GET /api/reports/stock`, `GET /api/reports/reconciliation`,
+`GET /api/reports/promotions`, `GET /api/reports/points` (mỗi endpoint
+nhận thêm `?format=csv`; không có màn hình báo cáo — GOAL-012).
 
 ## Stack
 
