@@ -590,6 +590,196 @@ smoke() {
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE \
     "http://127.0.0.1:$port/api/returns/$ret_id")"
   [ "$code" = "404" ] || { echo "DELETE return tra ve HTTP $code, mong 404"; return 1; }
+  # Khach hang + CRM (GOAL-008): tao khach -> trung phone 409 -> tao don
+  # gan khach -> xac nhan -> xu ly -> hoan tat -> thu tien -> tich diem
+  # 250000d -> 25 diem -> tich lai 400 -> doi 10 diem tru 1000d (outstanding
+  # 99000, van unpaid) -> doi vuot so du 400 -> ghi chu -> phan khuc new ->
+  # frequent -> tim/loc theo ten + phan khuc -> hop nhat khong confirm 400
+  # -> hop nhat co confirm (diem/lich su cong don) -> xuat du 4 phan ->
+  # audit log khong chua phone -> xoa khach chua co don duoc, khach co don
+  # 400 -> idempotency gui lai khong cong diem lan 2 -> RBAC 403.
+  local crm_p1 crm_p1v crm_p2 crm_p2v cust_res cust_id cord cord_id earn_res
+  local draft draft_id redeem_res pay_sum note_res seg search cust2_res
+  local cust2_id cust2_ord merge_res export_res audit_log del_res code2
+  local idem_ord idem_ord_id idem1 idem2 cust3_id
+  crm_p1="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-CRM-1","name":"San pham CRM 1","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  crm_p1="$(echo "$crm_p1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  crm_p1v="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-CRM-1","name":"Bien the CRM 1"}' \
+    "http://127.0.0.1:$port/api/products/$crm_p1/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")" || return 1
+  crm_p2="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-CRM-2","name":"San pham CRM 2","price":50000,"unit":"cai"}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  crm_p2="$(echo "$crm_p2" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  crm_p2v="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-CRM-2","name":"Bien the CRM 2"}' \
+    "http://127.0.0.1:$port/api/products/$crm_p2/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")" || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$crm_p1v,\"qty\":200,\"reason\":\"nhap CRM\"}" \
+    "http://127.0.0.1:$port/api/stock/in" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$crm_p2v,\"qty\":100,\"reason\":\"nhap CRM\"}" \
+    "http://127.0.0.1:$port/api/stock/in" >/dev/null || return 1
+  cust_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Nguyen Van A","phone":"0901000001","email":"a@example.local","branch_id":1}' \
+    "http://127.0.0.1:$port/api/customers")" || return 1
+  echo "$cust_res" | grep -q '"segment":"new"' || { echo "tao khach tra ve: $cust_res"; return 1; }
+  echo "$cust_res" | grep -q '"points_balance":0' || { echo "khach moi phai 0 diem: $cust_res"; return 1; }
+  cust_id="$(echo "$cust_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Trung So","phone":"0901000001"}' \
+    "http://127.0.0.1:$port/api/customers")"
+  [ "$code" = "409" ] || { echo "trung phone tra ve HTTP $code, mong 409"; return 1; }
+  cord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2},{\"variant_id\":$crm_p2v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$cord" | grep -q '"total":250000' || { echo "total don CRM sai: $cord"; return 1; }
+  cord_id="$(echo "$cord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cord_id/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":250000}' \
+    "http://127.0.0.1:$port/api/orders/$cord_id/payments" | grep -q '"status":"paid"' || return 1
+  earn_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$cord_id}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/earn")" || return 1
+  echo "$earn_res" | grep -q '"points_earned":25' || { echo "tich diem sai (mong 25): $earn_res"; return 1; }
+  echo "$earn_res" | grep -q '"points_balance":25' || { echo "so du sau tich sai: $earn_res"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$cord_id}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/earn")"
+  [ "$code" = "400" ] || { echo "tich lai cung don tra ve HTTP $code, mong 400"; return 1; }
+  # Them 2 don completed (moi don 200000) -> 3 don -> segment frequent.
+  local i extra_id
+  for i in 1 2; do
+    extra_id="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+      -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2}]}" \
+      "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+    curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$port/api/orders/$extra_id/confirm" >/dev/null || return 1
+    curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$port/api/orders/$extra_id/process" >/dev/null || return 1
+    curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$port/api/orders/$extra_id/complete" | grep -q '"status":"completed"' || return 1
+  done
+  seg="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust_id")" || return 1
+  echo "$seg" | grep -q '"segment":"frequent"' || { echo "phan khuc sai (mong frequent): $seg"; return 1; }
+  echo "$seg" | grep -q '"total_spent":650000' || { echo "tong chi sai (mong 650000): $seg"; return 1; }
+  # Doi diem: don draft 100000, doi 10 diem -> tru 1000d, outstanding 99000, van unpaid.
+  draft="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  draft_id="$(echo "$draft" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  redeem_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$draft_id,\"points\":10}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/redeem")" || return 1
+  echo "$redeem_res" | grep -q '"discount":1000' || { echo "doi diem sai discount: $redeem_res"; return 1; }
+  echo "$redeem_res" | grep -q '"points_balance":15' || { echo "so du sau doi sai: $redeem_res"; return 1; }
+  pay_sum="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/orders/$draft_id/payments")" || return 1
+  echo "$pay_sum" | grep -q '"outstanding":99000' || { echo "outstanding sau doi sai: $pay_sum"; return 1; }
+  echo "$pay_sum" | grep -q '"payment_status":"unpaid"' || { echo "payment_status sau doi sai: $pay_sum"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$draft_id,\"points\":100}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/redeem")"
+  [ "$code" = "400" ] || { echo "doi vuot so du tra ve HTTP $code, mong 400"; return 1; }
+  note_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"content":"Goi cham soc CRM"}' \
+    "http://127.0.0.1:$port/api/customers/$cust_id/notes")" || return 1
+  echo "$note_res" | grep -q '"content":"Goi cham soc CRM"' || { echo "ghi chu tra ve: $note_res"; return 1; }
+  search="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers?name=nguyen&segment=frequent")" || return 1
+  echo "$search" | grep -q "\"id\":$cust_id" || { echo "tim/loc khong thay khach: $search"; return 1; }
+  echo "$search" | grep -q '"total":1' || { echo "tong tim/loc sai: $search"; return 1; }
+  # Hop nhat: khach nguon + 1 don completed 100000 -> tich 10 diem.
+  cust2_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Nguon","phone":"0901000002"}' \
+    "http://127.0.0.1:$port/api/customers")" || return 1
+  cust2_id="$(echo "$cust2_res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  cust2_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust2_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cust2_ord/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cust2_ord/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$cust2_ord/complete" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$cust2_ord}" \
+    "http://127.0.0.1:$port/api/customers/$cust2_id/points/earn" | grep -q '"points_earned":10' || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$cust2_id}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/merge")"
+  [ "$code" = "400" ] || { echo "hop nhat thieu confirm tra ve HTTP $code, mong 400"; return 1; }
+  merge_res="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$cust2_id,\"confirm\":true}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/merge")" || return 1
+  echo "$merge_res" | grep -q '"points_balance":25' || { echo "diem sau hop nhat sai (mong 25): $merge_res"; return 1; }
+  echo "$merge_res" | grep -q '"total_spent":750000' || { echo "tong chi sau hop nhat sai (mong 750000): $merge_res"; return 1; }
+  echo "$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust2_id")" | grep -q '"status":"merged"' || { echo "khach nguon khong chuyen merged"; return 1; }
+  echo "$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust2_id")" | grep -q '"phone":null' || { echo "khach nguon phone khong ve NULL"; return 1; }
+  export_res="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust_id/export")" || return 1
+  echo "$export_res" | grep -q '"orders"' || { echo "export thieu orders: $export_res"; return 1; }
+  echo "$export_res" | grep -q '"points"' || { echo "export thieu points"; return 1; }
+  echo "$export_res" | grep -q '"notes"' || { echo "export thieu notes"; return 1; }
+  echo "$export_res" | grep -q '"balance":25' || { echo "export sai so du diem: $export_res"; return 1; }
+  audit_log="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/audit-log")" || return 1
+  echo "$audit_log" | grep -q '0901000001' && { echo "audit log chua phone khach!"; return 1; }
+  echo "$audit_log" | grep -q '"action":"earn-points"' || { echo "audit log thieu earn-points"; return 1; }
+  echo "$audit_log" | grep -q '"action":"merge-customers"' || { echo "audit log thieu merge-customers"; return 1; }
+  # Xoa: khach chua co don duoc, khach co don 400.
+  cust3_id="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Xoa","phone":"0901000003"}' \
+    "http://127.0.0.1:$port/api/customers" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  del_res="$(curl -fsS -b "$cookie" -X DELETE "http://127.0.0.1:$port/api/customers/$cust3_id")" || return 1
+  echo "$del_res" | grep -q '"ok":true' || { echo "xoa khach chua co don tra ve: $del_res"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust3_id")"
+  [ "$code" = "404" ] || { echo "GET khach da xoa tra ve HTTP $code, mong 404"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie" -X DELETE "http://127.0.0.1:$port/api/customers/$cust_id")"
+  [ "$code" = "400" ] || { echo "xoa khach co don tra ve HTTP $code, mong 400"; return 1; }
+  # Idempotency tich diem: don completed moi 200000 -> 20 diem, gui lai replayed.
+  idem_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"customer_id\":$cust_id,\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  idem_ord_id="$(echo "$idem_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$idem_ord_id/complete" >/dev/null || return 1
+  idem1="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-crm-earn-1' -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$idem_ord_id}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/earn")" || return 1
+  echo "$idem1" | grep -q '"points_earned":20' || { echo "tich idem lan 1 sai: $idem1"; return 1; }
+  idem2="$(curl -fsS -b "$cookie" -H 'Idempotency-Key: smoke-crm-earn-1' -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$idem_ord_id}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/points/earn")" || return 1
+  echo "$idem2" | grep -q '"replayed":true' || { echo "gui lai tich diem khong replay: $idem2"; return 1; }
+  seg="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/customers/$cust_id")" || return 1
+  echo "$seg" | grep -q '"points_balance":45' || { echo "so du sau gui lai sai (mong 45): $seg"; return 1; }
+  # RBAC CRM: warehouse tao khach 403, sales hop nhat 403, sales xoa 403,
+  # sales xem khach chua gan chi nhanh 403.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$wh_cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho tao khach"}' "http://127.0.0.1:$port/api/customers")"
+  [ "$code" = "403" ] || { echo "warehouse tao khach tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$cust2_id,\"confirm\":true}" \
+    "http://127.0.0.1:$port/api/customers/$cust_id/merge")"
+  [ "$code" = "403" ] || { echo "sales hop nhat tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" -X DELETE \
+    "http://127.0.0.1:$port/api/customers/$cust_id")"
+  [ "$code" = "403" ] || { echo "sales xoa khach tra ve HTTP $code, mong 403"; return 1; }
+  code2="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Chua Gan","phone":"0901000004"}' \
+    "http://127.0.0.1:$port/api/customers" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")" || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/customers/$code2")"
+  [ "$code" = "403" ] || { echo "sales xem khach chua gan tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN

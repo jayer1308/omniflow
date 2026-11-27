@@ -809,6 +809,230 @@ giao_tra_rbac() {
 }
 demo_step "giao/tra: sales yeu cau giao 403, warehouse yeu cau tra 403, sales duyet tra 403, DELETE 404" giao_tra_rbac
 
+# Khach hang + CRM (GOAL-008): tao khach -> trung phone 409 -> don gan
+# khach 250000 -> hoan tat -> thu tien -> tich 25 diem -> tich lai 400 ->
+# doi 10 diem tru 1000d (outstanding 99000, van unpaid) -> doi vuot so du
+# 400 -> ghi chu -> 3 don -> frequent -> tim/loc -> hop nhat khong
+# confirm 400 -> hop nhat co confirm (diem/lich su cong don) -> xuat du 4
+# phan -> audit log khong chua phone -> xoa khach chua co don duoc, khach
+# co don 400 -> idempotency gui lai khong cong diem lan 2 -> RBAC 403.
+CRM_FILE="$TMPDIR_DEMO/crm-customer.txt"
+CRM_SRC_FILE="$TMPDIR_DEMO/crm-source.txt"
+
+crm_tao_khach() {
+  local res id code
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Nguyen Van A","phone":"0901000001","email":"a@example.local","branch_id":1}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  echo "$res" | grep -q '"segment":"new"' || { echo "tao khach tra ve: $res"; return 1; }
+  echo "$res" | grep -q '"points_balance":0' || { echo "khach moi phai 0 diem: $res"; return 1; }
+  echo "$res" | grep -q '"total_spent":0' || { echo "khach moi phai tong chi 0: $res"; return 1; }
+  id="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  echo "$id" > "$CRM_FILE"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Trung So","phone":"0901000001"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  [ "$code" = "409" ] || { echo "trung phone tra ve HTTP $code, mong 409"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"phone":"0901000009"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  [ "$code" = "400" ] || { echo "thieu name tra ve HTTP $code, mong 400"; return 1; }
+}
+demo_step "khach/CRM: tao khach 201 segment new + 0 diem, trung phone 409, thieu name 400" crm_tao_khach
+
+crm_don_va_tich_diem() {
+  local id wha v1 v2 res ord code
+  id="$(cat "$CRM_FILE")"
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$id,\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$res" | grep -q '"total":250000' || { echo "total don CRM sai: $res"; return 1; }
+  ord="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  echo "$ord" > "$TMPDIR_DEMO/crm-order.txt"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":250000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/payments" | grep -q '"status":"paid"' || return 1
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/earn")"
+  echo "$res" | grep -q '"points_earned":25' || { echo "tich diem sai (mong 25): $res"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/earn")"
+  [ "$code" = "400" ] || { echo "tich lai cung don tra ve HTTP $code, mong 400"; return 1; }
+}
+demo_step "khach/CRM: don 250000 gan khach -> hoan tat -> thu tien -> tich 25 diem, tich lai 400" crm_don_va_tich_diem
+
+crm_doi_diem_va_ghi_chu() {
+  local id wha v1 res draft code sum
+  id="$(cat "$CRM_FILE")"
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$id,\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  draft="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$draft,\"points\":10}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/redeem")"
+  echo "$res" | grep -q '"discount":1000' || { echo "doi diem sai discount: $res"; return 1; }
+  echo "$res" | grep -q '"points_balance":15' || { echo "so du sau doi sai: $res"; return 1; }
+  sum="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/orders/$draft/payments")"
+  echo "$sum" | grep -q '"outstanding":99000' || { echo "outstanding sau doi sai: $sum"; return 1; }
+  echo "$sum" | grep -q '"payment_status":"unpaid"' || { echo "payment_status sau doi sai: $sum"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$draft,\"points\":100}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/redeem")"
+  [ "$code" = "400" ] || { echo "doi vuot so du tra ve HTTP $code, mong 400"; return 1; }
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"content":"Goi cham soc CRM"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/notes")"
+  echo "$res" | grep -q '"content":"Goi cham soc CRM"' || { echo "ghi chu tra ve: $res"; return 1; }
+  res="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points")"
+  echo "$res" | grep -q '"balance":15' || { echo "lich su diem sai so du: $res"; return 1; }
+}
+demo_step "khach/CRM: doi 10 diem tru 1000d (outstanding 99000, van unpaid), doi vuot so du 400, ghi chu 201" crm_doi_diem_va_ghi_chu
+
+crm_phan_khuc_va_tim() {
+  local id wha v1 res ord seg search i
+  id="$(cat "$CRM_FILE")"
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  for i in 1 2; do
+    res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+      -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$id,\"items\":[{\"variant_id\":$v1,\"qty\":2}]}" \
+      "http://127.0.0.1:$PORT_DEMO/api/orders")"
+    ord="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+    curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/confirm" >/dev/null || return 1
+    curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/process" >/dev/null || return 1
+    curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/complete" | grep -q '"status":"completed"' || return 1
+  done
+  seg="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$id")"
+  echo "$seg" | grep -q '"segment":"frequent"' || { echo "phan khuc sai (mong frequent): $seg"; return 1; }
+  echo "$seg" | grep -q '"total_spent":650000' || { echo "tong chi sai (mong 650000): $seg"; return 1; }
+  search="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers?name=nguyen&segment=frequent")"
+  echo "$search" | grep -q "\"id\":$id" || { echo "tim/loc khong thay khach: $search"; return 1; }
+  echo "$search" | grep -q '"total":1' || { echo "tong tim/loc sai: $search"; return 1; }
+}
+demo_step "khach/CRM: them 2 don completed -> frequent (tong chi 650000), tim theo ten + phan khuc" crm_phan_khuc_va_tim
+
+crm_hop_nhat_va_xuat() {
+  local id wha v1 res src src_ord code merge export log
+  id="$(cat "$CRM_FILE")"
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Nguon","phone":"0901000002"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  src="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  echo "$src" > "$CRM_SRC_FILE"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$src,\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  src_ord="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$src_ord/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$src_ord/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$src_ord/complete" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$src_ord}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$src/points/earn" | grep -q '"points_earned":10' || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$src}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/merge")"
+  [ "$code" = "400" ] || { echo "hop nhat thieu confirm tra ve HTTP $code, mong 400"; return 1; }
+  merge="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$src,\"confirm\":true}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/merge")"
+  echo "$merge" | grep -q '"points_balance":25' || { echo "diem sau hop nhat sai (mong 25): $merge"; return 1; }
+  echo "$merge" | grep -q '"total_spent":750000' || { echo "tong chi sau hop nhat sai (mong 750000): $merge"; return 1; }
+  export="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$id/export")"
+  echo "$export" | grep -q '"orders"' || { echo "export thieu orders"; return 1; }
+  echo "$export" | grep -q '"points"' || { echo "export thieu points"; return 1; }
+  echo "$export" | grep -q '"notes"' || { echo "export thieu notes"; return 1; }
+  echo "$export" | grep -q '"balance":25' || { echo "export sai so du diem: $export"; return 1; }
+  log="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/audit-log")"
+  echo "$log" | grep -q '0901000001' && { echo "audit log chua phone khach!"; return 1; }
+  echo "$log" | grep -q '"action":"merge-customers"' || { echo "audit log thieu merge-customers"; return 1; }
+}
+demo_step "khach/CRM: hop nhat thieu confirm 400, co confirm cong don diem/lich su, xuat du 4 phan, audit khong PII" crm_hop_nhat_va_xuat
+
+crm_xoa_va_idempotency() {
+  local id wha v1 res del code ord replay seg
+  id="$(cat "$CRM_FILE")"
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Xoa","phone":"0901000003"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  del="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -X DELETE "http://127.0.0.1:$PORT_DEMO/api/customers/$del" | grep -q '"ok":true' || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$del")"
+  [ "$code" = "404" ] || { echo "GET khach da xoa tra ve HTTP $code, mong 404"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -X DELETE "http://127.0.0.1:$PORT_DEMO/api/customers/$id")"
+  [ "$code" = "400" ] || { echo "xoa khach co don tra ve HTTP $code, mong 400"; return 1; }
+  res="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$id,\"items\":[{\"variant_id\":$v1,\"qty\":2}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  ord="$(echo "$res" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord/complete" >/dev/null || return 1
+  res="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-crm-earn-1' -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/earn")"
+  echo "$res" | grep -q '"points_earned":20' || { echo "tich idem lan 1 sai: $res"; return 1; }
+  replay="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-crm-earn-1' -H 'Content-Type: application/json' \
+    -d "{\"order_id\":$ord}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/points/earn")"
+  echo "$replay" | grep -q '"replayed":true' || { echo "gui lai tich diem khong replay: $replay"; return 1; }
+  seg="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$id")"
+  echo "$seg" | grep -q '"points_balance":45' || { echo "so du sau gui lai sai (mong 45): $seg"; return 1; }
+}
+demo_step "khach/CRM: xoa khach chua co don duoc + GET 404, khach co don 400, gui lai tich diem replayed" crm_xoa_va_idempotency
+
+crm_rbac() {
+  local id src code unassigned
+  id="$(cat "$CRM_FILE")"
+  src="$(cat "$CRM_SRC_FILE")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Kho tao khach"}' "http://127.0.0.1:$PORT_DEMO/api/customers")"
+  [ "$code" = "403" ] || { echo "warehouse tao khach tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"source_customer_id\":$src,\"confirm\":true}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/merge")"
+  [ "$code" = "403" ] || { echo "sales hop nhat tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" -X DELETE \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id")"
+  [ "$code" = "403" ] || { echo "sales xoa khach tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers/$id/export")"
+  [ "$code" = "403" ] || { echo "warehouse xuat du lieu tra ve HTTP $code, mong 403"; return 1; }
+  unassigned="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"name":"Khach Chua Gan","phone":"0901000004"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/customers" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$RBAC_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/customers/$unassigned")"
+  [ "$code" = "403" ] || { echo "sales xem khach chua gan tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "khach/CRM: warehouse tao khach 403, sales hop nhat/xoa 403, warehouse xuat 403, sales xem khach chua gan 403" crm_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -835,7 +1059,8 @@ demo_step "backup tao file, restore dua du lieu ve dung trang thai" backup_resto
 docs_present() {
   [ -f docs/ROADMAP.md ] && [ -f docs/DECISIONS.md ] && [ -f docs/SETUP.md ] \
     && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md \
-    && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md
+    && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md \
+    && grep -q 'D26' docs/DECISIONS.md && grep -q 'create-customer' docs/RBAC.md
 }
 demo_step "docs ROADMAP/DECISIONS/SETUP co mat" docs_present
 
