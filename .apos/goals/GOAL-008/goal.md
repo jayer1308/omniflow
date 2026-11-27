@@ -1,6 +1,6 @@
 # GOAL-008 v2: OmniFlow co nghiep vu khach hang + CRM tren don hang GOAL-005: ho so khach (chi nhanh chinh, dien thoai duy nhat trong org) + lich su mua (chi don completed) + tich diem 1 diem/10.000d khi don completed va doi diem 1 diem=100d tru tien don moi (khong het han, khong am, idempotency trong transaction) + ghi chu cham soc append-only + phan khuc tinh o service (VIP/ngu quen/thuong xuyen/moi, uu tien VIP truoc) + tim/loc khach theo ten/dien thoai/phan khuc/chi nhanh + hop nhat ho so trung co xac nhan (khong mat diem/lich su) + xuat du lieu khach va xoa chi khi chua co don, khong PII trong log; RBAC theo ma tran khach/CRM + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc khach/CRM moi; yeu cau R-16 va R-17 cua GOAL-006 duoc loai tru co ly do (out-of-scope)
 
-Status: verified
+Status: closed
 
 ```json
 {
