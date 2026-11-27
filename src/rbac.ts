@@ -441,6 +441,41 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       }
       return false;
     }
+    // GOAL-011: ma tran thong bao/job (docs/RBAC.md, D29). Xem thong bao:
+    // owner/manager/accountant toan org; sales chi thong bao chi nhanh
+    // minh (target.branchId NULL = khong gan chi nhanh -> sales khong
+    // thay); warehouse chi thong bao kho duoc gan. Xem job: owner/manager
+    // toan org, warehouse chi job kho duoc gan, sales/accountant 403.
+    // Chay job: chi owner/manager. Preferences: owner/manager sua cho
+    // user trong org; vai khac chi sua cua chinh minh (target.id).
+    case 'view-notifications': {
+      if (
+        actor.role === 'owner' ||
+        actor.role === 'manager' ||
+        actor.role === 'accountant'
+      ) {
+        return true;
+      }
+      if (actor.role === 'sales') return inScope(actor.branchId, targetBranch);
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return false;
+    }
+    case 'view-jobs': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      if (actor.role === 'warehouse') {
+        return inWarehouseScope(actor.warehouseId ?? null, target.warehouseId);
+      }
+      return false;
+    }
+    case 'run-jobs': {
+      return actor.role === 'owner' || actor.role === 'manager';
+    }
+    case 'manage-notification-preferences': {
+      if (actor.role === 'owner' || actor.role === 'manager') return true;
+      return target.id !== undefined && target.id === actor.id;
+    }
     default:
       return false;
   }
