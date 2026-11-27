@@ -24,6 +24,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { resolveEffectivePrice } from './products.js';
 import { can, type Actor } from './rbac.js';
 import { applyMovement } from './stock.js';
+import { enqueueOrderEvent } from './notifications.js';
 
 export type OrderStatus = 'draft' | 'confirmed' | 'processing' | 'completed' | 'cancelled';
 
@@ -537,6 +538,13 @@ export function transitionOrderTx(
   insertOrderEvent(db, orderId, order.status, to, actor.id, note);
   const updated = loadOrder(db, orderId);
   writeOrderAudit(db, actor.orgId, actor.id, `${action}-order`, updated, order.status, to);
+  // GOAL-011 (R-9): hook thong bao trong CUNG transaction voi cap nhat
+  // trang thai don — chi confirmed/completed/cancelled co su kien;
+  // process khong sinh thong bao. Gui lai cung trang thai la no-op o
+  // state machine nen khong toi day, khong tao job moi.
+  if (to === 'confirmed' || to === 'completed' || to === 'cancelled') {
+    enqueueOrderEvent(db, updated, `order.${to}`);
+  }
   return orderDetail(db, orderId);
 }
 

@@ -33,6 +33,15 @@ import {
   type OrderAction,
 } from './orders.js';
 import {
+  deriveEventScope,
+  deriveJobOrg,
+  enqueueOrderEvent,
+  isNotificationEventType,
+  NOTIFICATION_EVENT_TYPES,
+  type EventScope,
+} from './notifications.js';
+import { JOB_STATUSES, JOB_TYPES, processDueJobs } from './jobs.js';
+import {
   computePointsReport,
   computePromotionsReport,
   computeReconciliationReport,
@@ -210,6 +219,8 @@ interface PaymentOrderRow {
   code: string;
   status: string;
   total: number;
+  /** GOAL-008/011: khach gan voi don (NULL = khong gan) — can cho hook thong bao. */
+  customer_id: number | null;
 }
 
 function payBad(message: string): Error {
@@ -344,6 +355,12 @@ function createPaymentTx(
     amount,
     gateway_reference: gatewayReference,
   });
+  // GOAL-011 (R-9): thu tien truc tiep (cash/bank_transfer) chot 'paid'
+  // ngay -> job payment.paid trong CUNG transaction. Thu qua cong chi o
+  // 'requested' cho webhook chot sau (khong tao job o day).
+  if (isDirect) {
+    enqueueOrderEvent(db, order, 'payment.paid', { amount });
+  }
   return {
     payment: paymentDetail(db, paymentId) as PaymentDetail,
     order_summary: computePaymentSummary(db, orderId),
@@ -404,6 +421,9 @@ function processWebhookTx(
       source: 'webhook',
     });
     insertAudit(db, payment.org_id, null, 'webhook-paid', auditDetail);
+    // GOAL-011 (R-9): webhook paid chot -> job payment.paid trong CUNG
+    // transaction. Webhook lap/da tra thi ve som o tren, khong tao job.
+    enqueueOrderEvent(db, order, 'payment.paid', { amount });
     return {
       payment: paymentDetail(db, payment.id) as PaymentDetail,
       order_summary: computePaymentSummary(db, order.id),
@@ -448,6 +468,10 @@ function processWebhookTx(
     source: 'webhook',
   });
   insertAudit(db, payment.org_id, null, 'webhook-failed', auditDetail);
+  // GOAL-011 (R-9): webhook failed (chua tra truoc do) -> job
+  // payment.failed trong CUNG transaction. Da tra hoac da failed thi ve
+  // som o tren, khong tao job.
+  enqueueOrderEvent(db, order, 'payment.failed', { amount });
   return {
     payment: paymentDetail(db, payment.id) as PaymentDetail,
     order_summary: computePaymentSummary(db, order.id),
@@ -535,6 +559,11 @@ function createRefundTx(
     gateway_reference: payment.gateway_reference,
     refund_id: refundId,
   });
+  // GOAL-011 (R-9, quyet dinh (a) D29): moi refund duoc tao — ca hoan
+  // truc tiep GOAL-006 lan hoan qua tra hang GOAL-007 (refundReturnTx
+  // goi lai ham nay) — deu sinh job payment.refunded trong CUNG
+  // transaction.
+  enqueueOrderEvent(db, order, 'payment.refunded', { amount });
   const refund = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId) as unknown as Record<
     string,
     unknown
@@ -865,6 +894,19 @@ function updateShipmentTx(
     to_status: status,
     ...(status === 'failed' ? { reason: (body.reason as string).trim() } : {}),
   });
+  // GOAL-011 (R-9): doi trang thai giao -> job shipment.* trong CUNG
+  // transaction. Gui lai cung trang thai la no-op o tren, khong tao job.
+  const shipmentEvent =
+    status === 'in_transit'
+      ? 'shipment.shipped'
+      : status === 'delivered'
+        ? 'shipment.delivered'
+        : 'shipment.failed';
+  enqueueOrderEvent(db, order, shipmentEvent, {
+    carrier: shipment.carrier,
+    trackingCode: shipment.tracking_code,
+    ...(status === 'failed' ? { reason: (body.reason as string).trim() } : {}),
+  });
   return { shipment: shipmentDetail(db, shipment.id) };
 }
 
@@ -978,6 +1020,9 @@ function createReturnTx(
     from_status: null,
     to_status: 'requested',
   });
+  // GOAL-011 (R-9): tao yeu cau tra -> job return.requested trong CUNG
+  // transaction (them sales cua chi nhanh don, xem enqueueOrderEvent).
+  enqueueOrderEvent(db, order, 'return.requested', { returnCode: code });
   return { return: returnDetail(db, returnId) };
 }
 
@@ -1029,6 +1074,12 @@ function reviewReturnTx(
     return_code: ret.code,
     from_status: 'requested',
     to_status: decision,
+  });
+  // GOAL-011 (R-9): duyet/tu choi tra -> job return.approved /
+  // return.rejected trong CUNG transaction.
+  enqueueOrderEvent(db, order, `return.${decision}`, {
+    returnCode: ret.code,
+    ...(reviewReason !== null ? { reason: reviewReason } : {}),
   });
   return { return: returnDetail(db, ret.id) };
 }
@@ -1093,6 +1144,9 @@ function receiveReturnTx(
     from_status: 'approved',
     to_status: 'received',
   });
+  // GOAL-011 (R-9): nhan hang tra -> job return.received trong CUNG
+  // transaction.
+  enqueueOrderEvent(db, order, 'return.received', { returnCode: ret.code });
   return { return: returnDetail(db, ret.id) };
 }
 
@@ -5373,39 +5427,370 @@ export function createApp(db: DatabaseSync): Express {
     }
   });
 
-  // ---------- Thong bao + job (GOAL-011, STUB cua Tester) ----------
-  // 8 endpoint moi tra 501 'not implemented'; Worker implement day du
-  // (routes + RBAC + audit) theo brief-011.md. Test moi do do dung ly do.
-  app.get('/api/notification-preferences', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  // ---------- Thong bao + job (GOAL-011, D29) ----------
+  // Ghi nhan thong bao append-only + hang doi job trong tien trinh:
+  // GET/PATCH /api/notification-preferences, GET /api/notifications(+/:id),
+  // GET /api/jobs(+/:id), POST /api/jobs/run, POST /api/jobs/:id/retry.
+  // Moi endpoint qua requireAuth + can() (vai sai/sai chi nhanh/kho/ngoai
+  // org -> 403). Bang jobs khong co org_id, bang notifications khong co
+  // branch_id/warehouse_id nen pham vi suy tu payload/event_key qua
+  // deriveEventScope/deriveJobOrg (D29): ma don -> don, stock.low -> kho,
+  // promotion.expiring -> khuyen mai; job scan khong gan thuc the nao
+  // (global theo period_key).
+
+  interface NotificationRow {
+    id: number;
+    org_id: number;
+    event_key: string;
+    event_type: string;
+    channel: string;
+    recipient_user_id: number | null;
+    recipient_email: string;
+    subject: string;
+    body: string;
+    status: string;
+    error: string | null;
+    message_id: string | null;
+    created_at: string;
+  }
+
+  interface JobRow {
+    id: number;
+    type: string;
+    payload: string;
+    status: string;
+    attempts: number;
+    max_attempts: number;
+    next_run_at: string;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  }
+
+  /** Phan trang kieu list don GOAL-005: page mac dinh 1, limit mac dinh 20 toi da 100. */
+  function parsePageLimit(query: Record<string, unknown>): { page: number; limit: number } {
+    const pageRaw = typeof query.page === 'string' ? Number(query.page) : NaN;
+    const limitRaw = typeof query.limit === 'string' ? Number(query.limit) : NaN;
+    const page = Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+    const limit = Number.isInteger(limitRaw) ? Math.min(100, Math.max(1, limitRaw)) : 20;
+    return { page, limit };
+  }
+
+  function parseJobPayload(payload: string): Record<string, unknown> {
+    try {
+      return JSON.parse(payload) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  /** Job tra cho client: payload giai JSON de doc duoc (DB luu chuoi JSON). */
+  function serializeJob(row: JobRow): Record<string, unknown> {
+    return { ...row, payload: parseJobPayload(row.payload) };
+  }
+
+  /** Cai dat nhan cua 1 user: du 15 loai, thieu dong = BAT (R-3). */
+  function listPreferences(userId: number): Record<string, unknown>[] {
+    const rows = db
+      .prepare('SELECT event_type, enabled FROM notification_preferences WHERE user_id = ?')
+      .all(userId) as { event_type: string; enabled: number }[];
+    const byType = new Map(rows.map((r) => [r.event_type, r.enabled === 1]));
+    return NOTIFICATION_EVENT_TYPES.map((eventType) => ({
+      user_id: userId,
+      event_type: eventType,
+      enabled: byType.get(eventType) ?? true,
+    }));
+  }
+
+  /** true khi actor duoc xem 1 notification cu the (ma tran R-11). */
+  function notificationVisibleTo(actor: SessionUser, row: NotificationRow): boolean {
+    if (actor.role === 'owner' || actor.role === 'manager') return true;
+    if (actor.role === 'accountant') return row.event_type.startsWith('payment.');
+    const scope: EventScope | null = deriveEventScope(db, row.event_key, row.org_id);
+    if (scope === null) return false;
+    if (actor.role === 'sales') {
+      return scope.branchId !== null && scope.branchId === actor.branchId;
+    }
+    if (actor.role === 'warehouse') {
+      if (row.event_type !== 'stock.low') return false;
+      return (
+        actor.warehouseId === null ||
+        actor.warehouseId === undefined ||
+        scope.warehouseId === actor.warehouseId
+      );
+    }
+    return false;
+  }
+
+  app.get('/api/notification-preferences', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    let targetId = actor.id;
+    if (req.query.user_id !== undefined) {
+      if (typeof req.query.user_id !== 'string') {
+        res.status(400).json({ error: 'user_id không hợp lệ' });
+        return;
+      }
+      const n = Number(req.query.user_id);
+      if (!Number.isInteger(n)) {
+        res.status(400).json({ error: 'user_id không hợp lệ' });
+        return;
+      }
+      targetId = n;
+    }
+    const targetUser = getUserById(db, targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: 'không tìm thấy người dùng' });
+      return;
+    }
+    if (targetUser.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'người dùng không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    if (
+      !can(actor, 'manage-notification-preferences', { orgId: actor.orgId, id: targetId })
+    ) {
+      res.status(403).json({ error: 'bạn không được phép xem cài đặt nhận của người này' });
+      return;
+    }
+    res.json({ preferences: listPreferences(targetId) });
   });
 
-  app.patch('/api/notification-preferences', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.patch('/api/notification-preferences', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const body = (req.body ?? {}) as {
+      event_type?: unknown;
+      enabled?: unknown;
+      user_id?: unknown;
+    };
+    if (!isNotificationEventType(body.event_type)) {
+      res.status(400).json({ error: 'event_type không hợp lệ' });
+      return;
+    }
+    if (typeof body.enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled phải là true/false' });
+      return;
+    }
+    let targetId = actor.id;
+    if (body.user_id !== undefined && body.user_id !== null) {
+      if (typeof body.user_id !== 'number' || !Number.isInteger(body.user_id)) {
+        res.status(400).json({ error: 'user_id không hợp lệ' });
+        return;
+      }
+      targetId = body.user_id;
+    }
+    const targetUser = getUserById(db, targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: 'không tìm thấy người dùng' });
+      return;
+    }
+    if (targetUser.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'người dùng không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    if (
+      !can(actor, 'manage-notification-preferences', { orgId: actor.orgId, id: targetId })
+    ) {
+      res.status(403).json({ error: 'bạn không được phép sửa cài đặt nhận của người này' });
+      return;
+    }
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO notification_preferences (user_id, event_type, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, event_type) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+    ).run(targetId, body.event_type, body.enabled ? 1 : 0, now, now);
+    res.json({
+      preference: { user_id: targetId, event_type: body.event_type, enabled: body.enabled },
+    });
   });
 
-  app.get('/api/notifications', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/api/notifications', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const eventType = req.query.event_type;
+    if (eventType !== undefined && !isNotificationEventType(eventType)) {
+      res.status(400).json({ error: 'event_type không hợp lệ' });
+      return;
+    }
+    const status = req.query.status;
+    if (status !== undefined && status !== 'sent' && status !== 'failed') {
+      res.status(400).json({ error: 'status không hợp lệ' });
+      return;
+    }
+    const from = req.query.from;
+    const to = req.query.to;
+    const fromMs = typeof from === 'string' ? Date.parse(from) : NaN;
+    const toMs = typeof to === 'string' ? Date.parse(to) : NaN;
+    if ((from !== undefined && Number.isNaN(fromMs)) || (to !== undefined && Number.isNaN(toMs))) {
+      res.status(400).json({ error: 'from/to không hợp lệ' });
+      return;
+    }
+    let rows = db
+      .prepare('SELECT * FROM notifications WHERE org_id = ? ORDER BY id DESC')
+      .all(actor.orgId) as unknown as NotificationRow[];
+    // Loc theo vai (R-11): owner/manager toan org; accountant chi
+    // payment/refund; sales chi thong bao chi nhanh minh; warehouse chi
+    // stock.low kho duoc gan.
+    if (actor.role === 'accountant') {
+      rows = rows.filter((r) => r.event_type.startsWith('payment.'));
+    } else if (actor.role === 'sales' || actor.role === 'warehouse') {
+      rows = rows.filter((r) => notificationVisibleTo(actor, r));
+    }
+    if (eventType !== undefined) rows = rows.filter((r) => r.event_type === eventType);
+    if (status !== undefined) rows = rows.filter((r) => r.status === status);
+    if (from !== undefined) rows = rows.filter((r) => Date.parse(r.created_at) >= fromMs);
+    if (to !== undefined) rows = rows.filter((r) => Date.parse(r.created_at) <= toMs);
+    const total = rows.length;
+    const { page, limit } = parsePageLimit(req.query as Record<string, unknown>);
+    res.json({
+      notifications: rows.slice((page - 1) * limit, page * limit),
+      total,
+      page,
+      limit,
+    });
   });
 
-  app.get('/api/notifications/:id', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/api/notifications/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const row = db.prepare('SELECT * FROM notifications WHERE id = ?').get(id) as
+      | NotificationRow
+      | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'không tìm thấy thông báo' });
+      return;
+    }
+    if (row.org_id !== actor.orgId) {
+      res.status(403).json({ error: 'thông báo không thuộc doanh nghiệp của bạn' });
+      return;
+    }
+    if (!notificationVisibleTo(actor, row)) {
+      res.status(403).json({ error: 'bạn không được phép xem thông báo này' });
+      return;
+    }
+    res.json({ notification: row });
   });
 
-  app.get('/api/jobs', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/api/jobs', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    // Sales xem job -> 403, accountant xem job -> 403 (ma tran R-11).
+    if (actor.role === 'sales' || actor.role === 'accountant') {
+      res.status(403).json({ error: 'bạn không được phép xem job' });
+      return;
+    }
+    const status = req.query.status;
+    if (status !== undefined && !(JOB_STATUSES as readonly string[]).includes(status as string)) {
+      res.status(400).json({ error: 'status không hợp lệ' });
+      return;
+    }
+    const type = req.query.type;
+    if (type !== undefined && !(JOB_TYPES as readonly string[]).includes(type as string)) {
+      res.status(400).json({ error: 'type không hợp lệ' });
+      return;
+    }
+    let rows = db.prepare('SELECT * FROM jobs ORDER BY id DESC').all() as unknown as JobRow[];
+    if (actor.role === 'warehouse') {
+      // Warehouse chi xem job low-stock-scan (R-11).
+      rows = rows.filter((r) => r.type === 'low-stock-scan');
+    } else {
+      // Owner/manager toan org: job send-notification suy org tu
+      // event_key (khong suy duoc thi hien — vd job test chen tay);
+      // job scan global (khong gan org) thi hien.
+      rows = rows.filter((r) => {
+        if (r.type !== 'send-notification') return true;
+        const orgId = deriveJobOrg(db, parseJobPayload(r.payload));
+        return orgId === null || orgId === actor.orgId;
+      });
+    }
+    if (status !== undefined) rows = rows.filter((r) => r.status === status);
+    if (type !== undefined) rows = rows.filter((r) => r.type === type);
+    const total = rows.length;
+    const { page, limit } = parsePageLimit(req.query as Record<string, unknown>);
+    res.json({
+      jobs: rows.slice((page - 1) * limit, page * limit).map(serializeJob),
+      total,
+      page,
+      limit,
+    });
   });
 
-  app.get('/api/jobs/:id', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/api/jobs/:id', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (actor.role === 'sales' || actor.role === 'accountant') {
+      res.status(403).json({ error: 'bạn không được phép xem job' });
+      return;
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const row = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'không tìm thấy job' });
+      return;
+    }
+    if (actor.role === 'warehouse' && row.type !== 'low-stock-scan') {
+      res.status(403).json({ error: 'bạn chỉ được xem job low-stock-scan' });
+      return;
+    }
+    if (row.type === 'send-notification') {
+      const orgId = deriveJobOrg(db, parseJobPayload(row.payload));
+      if (orgId !== null && orgId !== actor.orgId) {
+        res.status(403).json({ error: 'job không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    res.json({ job: serializeJob(row) });
   });
 
-  app.post('/api/jobs/run', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.post('/api/jobs/run', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'run-jobs', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'bạn không được phép chạy job' });
+      return;
+    }
+    res.json(processDueJobs(db, new Date()));
   });
 
-  app.post('/api/jobs/:id/retry', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.post('/api/jobs/:id/retry', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    if (!can(actor, 'run-jobs', { orgId: actor.orgId })) {
+      res.status(403).json({ error: 'bạn không được phép retry job' });
+      return;
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: 'id không hợp lệ' });
+      return;
+    }
+    const row = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'không tìm thấy job' });
+      return;
+    }
+    if (row.type === 'send-notification') {
+      const orgId = deriveJobOrg(db, parseJobPayload(row.payload));
+      if (orgId !== null && orgId !== actor.orgId) {
+        res.status(403).json({ error: 'job không thuộc doanh nghiệp của bạn' });
+        return;
+      }
+    }
+    if (row.status !== 'failed') {
+      res.status(400).json({ error: 'chỉ retry được job đã failed' });
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    db.prepare(
+      'UPDATE jobs SET status = ?, attempts = 0, next_run_at = ?, last_error = NULL, updated_at = ? WHERE id = ?',
+    ).run('pending', nowIso, nowIso, id);
+    const orgId = deriveJobOrg(db, parseJobPayload(row.payload)) ?? actor.orgId;
+    insertAudit(db, orgId, actor.id, 'job-retried', { job_id: id, job_type: row.type });
+    const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as unknown as JobRow;
+    res.json({ job: serializeJob(updated) });
   });
 
   return app;

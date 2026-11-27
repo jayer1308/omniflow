@@ -990,11 +990,104 @@ smoke() {
   [ "$code" = "403" ] || { echo "warehouse xem doanh thu tra ve HTTP $code, mong 403"; return 1; }
   code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/reports/stock")"
   [ "$code" = "403" ] || { echo "sales xem bao cao ton tra ve HTTP $code, mong 403"; return 1; }
+  # Thong bao + job (GOAL-011): don 250000d counter -> xac nhan -> hoan
+  # tat -> thu 100000d -> chay job due -> notification order.completed +
+  # payment.paid sent, gui lai khong trung -> cap ton thap -> chay
+  # low-stock-scan -> stock.low dung kho -> ma het han trong 2 ngay ->
+  # chay promo-expiry-scan -> promotion.expiring -> job fail gia lap ->
+  # retry tay -> sent -> RBAC 403 (sales xem job, warehouse chay job).
+  # Scan kich hoat bang helper scripts/notif-ops.ts (mo cung file DB,
+  # chay cung code src/jobs.ts) vi POST /api/jobs/run CHI chay job due.
+  local nt_ord nt_ord_id nt_code nt_run nt_notes nt_paid nt_run2 nt_prod nt_var
+  local nt_low_out nt_promo nt_from nt_to nt_fail_out nt_fail_id nt_retry nt_run3 nt_audit
+  nt_ord="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"channel\":\"counter\",\"items\":[{\"variant_id\":$crm_p1v,\"qty\":2},{\"variant_id\":$crm_p2v,\"qty\":1}]}" \
+    "http://127.0.0.1:$port/api/orders")" || return 1
+  echo "$nt_ord" | grep -q '"total":250000' || { echo "total don thong bao sai: $nt_ord"; return 1; }
+  nt_ord_id="$(echo "$nt_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  nt_code="$(echo "$nt_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).code))")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$nt_ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$nt_ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/orders/$nt_ord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$port/api/orders/$nt_ord_id/payments" | grep -q '"status":"paid"' || return 1
+  nt_run="$(curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/run")" || return 1
+  [ "$(echo "$nt_run" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log(b.done>=3 && b.failed===0)})")" = "true" ] || { echo "chay job due sai: $nt_run"; return 1; }
+  nt_notes="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notifications?event_type=order.completed&status=sent")" || return 1
+  echo "$nt_notes" | grep -q "\"event_key\":\"order.completed:$nt_code\"" || { echo "thieu notification order.completed sent: $nt_notes"; return 1; }
+  nt_paid="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notifications?event_type=payment.paid&status=sent")" || return 1
+  echo "$nt_paid" | grep -q "\"event_key\":\"payment.paid:$nt_code\"" || { echo "thieu notification payment.paid sent: $nt_paid"; return 1; }
+  nt_run2="$(curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/run")" || return 1
+  echo "$nt_run2" | grep -q '"processed":0' || { echo "chay lai job due phai 0 job: $nt_run2"; return 1; }
+  # Preferences: tat order.completed -> GET thay false -> bat lai.
+  curl -fsS -X PATCH -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"event_type":"order.completed","enabled":false}' \
+    "http://127.0.0.1:$port/api/notification-preferences" | grep -q '"enabled":false' || return 1
+  curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notification-preferences" | grep -q '"event_type":"order.completed","enabled":false' || return 1
+  curl -fsS -X PATCH -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"event_type":"order.completed","enabled":true}' \
+    "http://127.0.0.1:$port/api/notification-preferences" | grep -q '"enabled":true' || return 1
+  # Cap ton thap: san pham min_stock 10, nhap 4 vao kho A -> scan -> stock.low.
+  nt_prod="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-TB-SMOKE","name":"San pham ton thap","price":100000,"unit":"cai","min_stock":10}' \
+    "http://127.0.0.1:$port/api/products")" || return 1
+  nt_prod="$(echo "$nt_prod" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  nt_var="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-TB-SMOKE","name":"Bien the ton thap"}' \
+    "http://127.0.0.1:$port/api/products/$nt_prod/variants")" || return 1
+  nt_var="$(echo "$nt_var" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha_id,\"variant_id\":$nt_var,\"qty\":4,\"reason\":\"nhap thong bao\"}" \
+    "http://127.0.0.1:$port/api/stock/in" >/dev/null || return 1
+  nt_low_out="$(npx tsx scripts/notif-ops.ts low-stock-scan)" || return 1
+  echo "$nt_low_out" | grep -q 'created=' || { echo "low-stock-scan loi: $nt_low_out"; return 1; }
+  curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/run" >/dev/null || return 1
+  nt_notes="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notifications?event_type=stock.low&status=sent")" || return 1
+  echo "$nt_notes" | grep -q "\"event_key\":\"stock.low:variant:$nt_var:warehouse:$wha_id:" || { echo "thieu notification stock.low dung kho: $nt_notes"; return 1; }
+  echo "$nt_notes" | grep -q 'SKU-TB-SMOKE' || { echo "notification stock.low thieu SKU: $nt_notes"; return 1; }
+  # Ma sap het han trong 2 ngay -> scan -> promotion.expiring.
+  nt_from="$(node -e "console.log(new Date(Date.now()-86400000).toISOString())")"
+  nt_to="$(node -e "console.log(new Date(Date.now()+2*86400000).toISOString())")"
+  nt_promo="$(curl -fsS -b "$cookie" -H 'Content-Type: application/json' \
+    -d "{\"code\":\"SAPHAN\",\"type\":\"percent\",\"value\":10,\"valid_from\":\"$nt_from\",\"valid_to\":\"$nt_to\"}" \
+    "http://127.0.0.1:$port/api/promotions")" || return 1
+  echo "$nt_promo" | grep -q '"code":"SAPHAN"' || { echo "tao ma sap het han tra ve: $nt_promo"; return 1; }
+  npx tsx scripts/notif-ops.ts promo-expiry-scan >/dev/null || return 1
+  curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/run" >/dev/null || return 1
+  nt_notes="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notifications?event_type=promotion.expiring&status=sent")" || return 1
+  echo "$nt_notes" | grep -q 'SAPHAN' || { echo "thieu notification promotion.expiring: $nt_notes"; return 1; }
+  # Job fail gia lap 3 lan -> retry tay -> sent; audit co job-failed + job-retried.
+  nt_fail_out="$(npx tsx scripts/notif-ops.ts fail-job)" || return 1
+  nt_fail_id="$(echo "$nt_fail_out" | sed 's/failed_job_id=//')"
+  nt_retry="$(curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/$nt_fail_id/retry")" || return 1
+  echo "$nt_retry" | grep -q '"status":"pending"' || { echo "retry job tra ve: $nt_retry"; return 1; }
+  nt_run3="$(curl -fsS -X POST -b "$cookie" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$port/api/jobs/run")" || return 1
+  echo "$nt_run3" | grep -q '"done":1' || { echo "chay job sau retry sai: $nt_run3"; return 1; }
+  nt_notes="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/notifications?event_type=order.completed&status=sent")" || return 1
+  echo "$nt_notes" | grep -q '"event_key":"order.completed:DH-SMOKE-FAIL-0001"' || { echo "job retry xong thieu notification sent: $nt_notes"; return 1; }
+  nt_audit="$(curl -fsS -b "$cookie" "http://127.0.0.1:$port/api/audit-log")" || return 1
+  echo "$nt_audit" | grep -q '"action":"job-failed"' || { echo "audit log thieu job-failed"; return 1; }
+  echo "$nt_audit" | grep -q '"action":"job-retried"' || { echo "audit log thieu job-retried"; return 1; }
+  # RBAC 403: sales xem job, warehouse chay job.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$sales2_cookie" "http://127.0.0.1:$port/api/jobs")"
+  [ "$code" = "403" ] || { echo "sales xem job tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$wh_cookie" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$port/api/jobs/run")"
+  [ "$code" = "403" ] || { echo "warehouse chay job tra ve HTTP $code, mong 403"; return 1; }
   kill "$server_pid" 2>/dev/null
   wait "$server_pid" 2>/dev/null || true
   trap - RETURN
   rm -rf "$tmpdir"
-  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404) + khuyen mai (tao ma 10% cap 20000, trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400, ap ma het han 400, ap ma sai kenh 400, doi diem tren don co ma + thu tien outstanding 129000, huy don hoan luot dung + ap lai duoc, idempotency gui lai replayed + used_count 2, RBAC 403 warehouse tao ma / sales ap ma ngoai chi nhanh / warehouse xem ma) + bao cao/doi soat (don 250000 hoan tat thu 100000, draft/huy khong vao doanh thu: gross 250000, so don 1, paid 100000, outstanding 150000; kenh counter khop so; doi soat error 0; bao cao khuyen mai + diem; CSV khop JSON + audit export-report; RBAC 403 sales xem doanh thu chi nhanh khac / warehouse xem doanh thu / sales xem bao cao ton)"
+  echo "smoke server tren port $port: health + login + owner-only + staff 403 + RBAC moi/khoa/audit/403 + san-pham/gia/CSV (tao san pham, bien the, trung SKU 409, gia rieng + fallback, lich su gia, preview/import/export CSV, RBAC 403) + kho (tao kho, nhap, xuat, xuat qua ton 400, giu, giai phong, chuyen kho, kiem ke, ton thap, idempotency, race 5/5, RBAC 403, ngoai org 403) + don (tao don snapshot gia, xac nhan giu, xu ly, hoan tat xuat kho, huy khi dang xu ly giai phong, chuyen sai 400, idempotency, race 5/5, RBAC 403, ngoai org 403) + thanh toan (thu tien mat, thu qua cong + webhook paid chot + webhook lap duplicate, webhook sai chu ky 401, hoan mot phan + doi soat dung so, idempotency, RBAC 403, DELETE 404) + giao/tra (don nhap khong giao 400, yeu cau giao phi 30000/ETA 1 + ma van don + idempotency, sai thu tu 400, lap cung trang thai khong tao event, delivered, tra 1 ban lai duoc + 1 hong -> duyet -> nhan dung so ton, hoan tien + doi soat partially_refunded, RBAC 403, DELETE 404) + khuyen mai (tao ma 10% cap 20000, trung ma 409, tao ma fixed, don 250000 ap ma giam 20000, ap lai 400, ap ma het han 400, ap ma sai kenh 400, doi diem tren don co ma + thu tien outstanding 129000, huy don hoan luot dung + ap lai duoc, idempotency gui lai replayed + used_count 2, RBAC 403 warehouse tao ma / sales ap ma ngoai chi nhanh / warehouse xem ma) + bao cao/doi soat (don 250000 hoan tat thu 100000, draft/huy khong vao doanh thu: gross 250000, so don 1, paid 100000, outstanding 150000; kenh counter khop so; doi soat error 0; bao cao khuyen mai + diem; CSV khop JSON + audit export-report; RBAC 403 sales xem doanh thu chi nhanh khac / warehouse xem doanh thu / sales xem bao cao ton) + thong bao/job (don 250000 hoan tat thu 100000, chay job due -> notification order.completed + payment.paid sent, chay lai 0 job, preferences tat/bat, cap ton thap -> low-stock-scan -> stock.low dung kho, ma het han 2 ngay -> promo-expiry-scan -> promotion.expiring, job fail gia lap -> retry tay -> sent + audit job-failed/job-retried, RBAC 403 sales xem job / warehouse chay job)"
 }
 step "smoke server" smoke
 

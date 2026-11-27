@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { migrate, openDb } from './db.js';
 import { seed } from './seed.js';
 import { createApp } from './app.js';
+import { recoverRunningJobs, startNotificationScheduler } from './jobs.js';
 
 const dbPath = process.env.OMNIFLOW_DB ?? 'data/omniflow.db';
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -31,3 +32,11 @@ const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
   console.log(`OmniFlow chay o http://localhost:${port}`);
 });
+
+// GOAL-011 (R-4/R-6): job dang running cua tien trinh cu (chet giua
+// chung, vd VM restart) ve pending khi khoi dong; scheduler lich scan
+// 60 phut/loai (setInterval trong tien trinh, khong chay trong test vi
+// test chi goi createApp, khong chay server.ts).
+const recovered = recoverRunningJobs(db, new Date());
+if (recovered > 0) console.log(`Khoi phuc ${recovered} job dang do ve pending`);
+startNotificationScheduler(db);

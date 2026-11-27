@@ -235,6 +235,26 @@ tồn → 403); warehouse chỉ báo cáo tồn kho được gán (các báo cá
 `GET /api/reports/promotions`, `GET /api/reports/points` (mỗi endpoint
 nhận thêm `?format=csv`; không có màn hình báo cáo — GOAL-012).
 
+## Thông báo + công việc nền (GOAL-011, D29)
+
+Sự kiện đơn/thanh toán/giao/trả/tồn thấp/mã sắp hết hạn sinh thông báo
+qua `FakeEmailAdapter` (`simulated: true`, không gửi email thật), log
+append-only vào bảng `notifications` (`event_key` chống trùng theo
+người nhận). Hàng đợi job trong tiến trình (`jobs`:
+send-notification/low-stock-scan/promo-expiry-scan), chạy tuần tự qua
+`processDueJobs`, retry tối đa 3 lần + backoff 60s/120s, scheduler
+`setInterval` 60 phút/loại scan (dedupe theo ngày Asia/Ho_Chi_Minh),
+khôi phục job `running` về `pending` khi khởi động. Cài đặt nhận theo
+người dùng (thiếu dòng = bật). RBAC: owner/manager toàn org; sales chỉ
+thông báo chi nhánh mình (xem job → 403); warehouse chỉ thông báo
+`stock.low` kho được gán + job low-stock-scan; accountant chỉ thông báo
+payment/refund. Audit CHỈ thất bại cuối + retry tay. Xem `docs/RBAC.md`
+(ma trận thông báo/job) và `docs/DECISIONS.md` (D29). Endpoint chính:
+`GET/PATCH /api/notification-preferences`, `GET /api/notifications`,
+`GET /api/notifications/:id`, `GET /api/jobs`, `GET /api/jobs/:id`,
+`POST /api/jobs/run` (trả `{processed, done, failed}`),
+`POST /api/jobs/:id/retry` (không có màn hình thông báo/job — GOAL-012).
+
 ## Stack
 
 TypeScript + Node 24 + Express + SQLite (`node:sqlite`) + EJS server-rendered,

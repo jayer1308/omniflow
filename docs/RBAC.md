@@ -400,6 +400,54 @@ GOAL-002 (`GET /api/audit-log`: owner toàn org, manager trong phạm vi,
 các vai khác → 403). Không có API sửa/xóa báo cáo (báo cáo chỉ đọc, gọi
 POST/DELETE → 404); không thêm màn hình báo cáo (GOAL-012).
 
+### Ma trận quyền thông báo + job (GOAL-011, D29)
+
+Thông báo/job là dữ liệu cấp org, lọc theo vai + phạm vi suy từ
+`event_key` (`deriveEventScope`/`deriveJobOrg`, D29): mã đơn → chi
+nhánh/kho của đơn; `stock.low` → kho trong event_key;
+`promotion.expiring` → org của mã. Bảng `jobs` không có `org_id`,
+bảng `notifications` không có `branch_id`/`warehouse_id` nên phạm vi
+được suy ra, không thêm cột. Helper `can()` mở rộng 4 actions:
+`view-notifications` (xem thông báo), `manage-notification-preferences`
+(xem/sửa cài đặt nhận), `view-jobs` (xem job), `run-jobs` (chạy job tay
++ retry). Mọi endpoint thông báo/job qua `requireAuth` + `can()`; ngoài
+org → 403.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Xem thông báo (`GET /api/notifications`, `GET /api/notifications/:id`) | Được, toàn org | Được, toàn org | Được, chỉ thông báo thuộc chi nhánh mình (thông báo không gắn chi nhánh thì không thấy) | Được, chỉ thông báo `stock.low` của kho được gán | Được, chỉ thông báo payment/refund toàn org (chỉ xem) |
+| Xem/sửa cài đặt nhận (`GET/PATCH /api/notification-preferences`) | Được, của mình + user trong org | Được, của mình + user trong org | Được, chỉ của mình (sửa của người khác → 403) | Được, chỉ của mình (sửa của người khác → 403) | Được, chỉ của mình (sửa của người khác → 403) |
+| Xem job (`GET /api/jobs`, `GET /api/jobs/:id`) | Được, toàn org (+ job scan global) | Được, toàn org (+ job scan global) | Không (403) | Được, chỉ job `low-stock-scan` | Không (403) |
+| Chạy job tay + retry (`POST /api/jobs/run`, `POST /api/jobs/:id/retry`) | Được | Được | Không (403) | Không (403) | Không (403) |
+
+Ghi chú: `sales` xem thông báo chi nhánh khác → 403; `sales` xem job
+→ 403; `warehouse` xem thông báo không phải tồn kho → 403;
+`warehouse` chạy job → 403; `accountant` chạy job → 403; user org A
+đọc thông báo/job org B → 403; job chưa `failed` mà retry → 400;
+`event_type`/`status`/`type` lạ → 400.
+
+### Endpoints mới (GOAL-011)
+
+| Endpoint | Vai trò |
+|---|---|
+| `GET /api/notification-preferences?user_id=` | tự xem của mình; owner/manager xem cho user trong org; vai khác xem của người khác → 403 |
+| `PATCH /api/notification-preferences` | như trên; `event_type` lạ → 400, `enabled` không phải boolean → 400 |
+| `GET /api/notifications?event_type=&status=&from=&to=` | owner/manager toàn org; sales chỉ chi nhánh mình; warehouse chỉ `stock.low` kho được gán; accountant chỉ payment/refund |
+| `GET /api/notifications/:id` | như trên theo từng bản ghi; ngoài org → 403 |
+| `GET /api/jobs?status=&type=`, `GET /api/jobs/:id` | owner/manager toàn org; warehouse chỉ job `low-stock-scan`; sales/accountant → 403 |
+| `POST /api/jobs/run` | owner/manager; trả `{processed, done, failed}` |
+| `POST /api/jobs/:id/retry` | owner/manager; failed → pending (attempts 0, `next_run_at` = now, `last_error` NULL) + audit `job-retried`; chưa failed → 400 |
+
+Audit log: CHỈ thất bại cuối + retry tay mới ghi `audit_log` — gửi
+thất bại cuối (`notification-failed`, `detail` `{event_key,
+event_type, recipient_user_id (nếu có), error}` — KHÔNG nội dung
+email, KHÔNG email khách), job failed cuối (`job-failed`, `detail`
+`{job_id, job_type, last_error}`), retry tay (`job-retried`, `detail`
+`{job_id, job_type}`). Gửi thành công KHÔNG ghi audit (lịch sử gửi đã
+có bảng `notifications`). Xem log theo luật GOAL-002. Không thêm màn
+hình thông báo/job (GOAL-012); email chỉ qua `FakeEmailAdapter`
+(`simulated: true`), không gửi email thật.
+
 Audit log: mọi thao tác tạo/sửa/khóa mã, áp mã, hoàn lượt dùng khi hủy
 đơn đều ghi `audit_log` (`action` `create-promotion` /
 `update-promotion` / `apply-promotion` / `promotion-usage-released`,

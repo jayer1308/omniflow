@@ -1291,6 +1291,103 @@ report_doi_soat_csv_rbac() {
 }
 demo_step "bao cao: kenh counter khop 250000, doi soat error 0, CSV khop JSON + audit export-report, RBAC 403" report_doi_soat_csv_rbac
 
+# Thong bao + cong viec nen (GOAL-011): don 250000d counter -> xac nhan
+# -> hoan tat -> thu 100000d -> chay job due -> notification
+# order.completed + payment.paid sent, gui lai khong trung -> cap ton
+# thap -> chay low-stock-scan -> stock.low dung kho -> ma het han trong
+# 2 ngay -> chay promo-expiry-scan -> promotion.expiring -> job fail gia
+# lap -> retry tay -> sent -> RBAC 403 (sales xem job, warehouse chay
+# job). Scan kich hoat bang helper scripts/notif-ops.ts (mo cung file
+# DB, chay cung code src/jobs.ts) vi POST /api/jobs/run CHI chay job due.
+notif_don_va_chay_job() {
+  local wha v1 v2 ord ord_id code run notes paid run2
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$ord" | grep -q '"total":250000' || { echo "total don thong bao sai: $ord"; return 1; }
+  ord_id="$(echo "$ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(echo "$ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).code))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/payments" | grep -q '"status":"paid"' || return 1
+  run="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run")"
+  [ "$(echo "$run" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log(b.done>=3 && b.failed===0)})")" = "true" ] || { echo "chay job due sai: $run"; return 1; }
+  notes="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notifications?event_type=order.completed&status=sent")"
+  echo "$notes" | grep -q "\"event_key\":\"order.completed:$code\"" || { echo "thieu notification order.completed sent: $notes"; return 1; }
+  paid="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notifications?event_type=payment.paid&status=sent")"
+  echo "$paid" | grep -q "\"event_key\":\"payment.paid:$code\"" || { echo "thieu notification payment.paid sent: $paid"; return 1; }
+  run2="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run")"
+  echo "$run2" | grep -q '"processed":0' || { echo "chay lai job due phai 0 job: $run2"; return 1; }
+  curl -fsS -X PATCH -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"event_type":"order.completed","enabled":false}' \
+    "http://127.0.0.1:$PORT_DEMO/api/notification-preferences" | grep -q '"enabled":false' || return 1
+  curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notification-preferences" | grep -q '"event_type":"order.completed","enabled":false' || return 1
+  curl -fsS -X PATCH -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"event_type":"order.completed","enabled":true}' \
+    "http://127.0.0.1:$PORT_DEMO/api/notification-preferences" | grep -q '"enabled":true' || return 1
+}
+demo_step "thong bao: don 250000 hoan tat thu 100000, chay job due -> notification order.completed + payment.paid sent, chay lai 0 job, preferences tat/bat" notif_don_va_chay_job
+
+notif_scan_va_retry_rbac() {
+  local wha prod var notes from to promo fail_out fail_id retry run3 audit code
+  wha="$(cat "$WHA_FILE")"
+  prod="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-TB-DEMO","name":"San pham ton thap","price":100000,"unit":"cai","min_stock":10}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  var="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-TB-DEMO","name":"Bien the ton thap"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$prod/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$var,\"qty\":4,\"reason\":\"nhap thong bao\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in" >/dev/null || return 1
+  npx tsx scripts/notif-ops.ts low-stock-scan | grep -q 'created=' || return 1
+  curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run" >/dev/null || return 1
+  notes="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notifications?event_type=stock.low&status=sent")"
+  echo "$notes" | grep -q "\"event_key\":\"stock.low:variant:$var:warehouse:$wha:" || { echo "thieu notification stock.low dung kho: $notes"; return 1; }
+  echo "$notes" | grep -q 'SKU-TB-DEMO' || { echo "notification stock.low thieu SKU: $notes"; return 1; }
+  from="$(node -e "console.log(new Date(Date.now()-86400000).toISOString())")"
+  to="$(node -e "console.log(new Date(Date.now()+2*86400000).toISOString())")"
+  promo="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"code\":\"SAPHAN\",\"type\":\"percent\",\"value\":10,\"valid_from\":\"$from\",\"valid_to\":\"$to\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/promotions")"
+  echo "$promo" | grep -q '"code":"SAPHAN"' || { echo "tao ma sap het han tra ve: $promo"; return 1; }
+  npx tsx scripts/notif-ops.ts promo-expiry-scan >/dev/null || return 1
+  curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run" >/dev/null || return 1
+  notes="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notifications?event_type=promotion.expiring&status=sent")"
+  echo "$notes" | grep -q 'SAPHAN' || { echo "thieu notification promotion.expiring: $notes"; return 1; }
+  fail_out="$(npx tsx scripts/notif-ops.ts fail-job)" || return 1
+  fail_id="$(echo "$fail_out" | sed 's/failed_job_id=//')"
+  retry="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/$fail_id/retry")"
+  echo "$retry" | grep -q '"status":"pending"' || { echo "retry job tra ve: $retry"; return 1; }
+  run3="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run")"
+  echo "$run3" | grep -q '"done":1' || { echo "chay job sau retry sai: $run3"; return 1; }
+  notes="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/notifications?event_type=order.completed&status=sent")"
+  echo "$notes" | grep -q '"event_key":"order.completed:DH-SMOKE-FAIL-0001"' || { echo "job retry xong thieu notification sent: $notes"; return 1; }
+  audit="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/audit-log")"
+  echo "$audit" | grep -q '"action":"job-failed"' || { echo "audit log thieu job-failed"; return 1; }
+  echo "$audit" | grep -q '"action":"job-retried"' || { echo "audit log thieu job-retried"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$SALES2_COOKIE" "http://127.0.0.1:$PORT_DEMO/api/jobs")"
+  [ "$code" = "403" ] || { echo "sales xem job tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$WH_COOKIE" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT_DEMO/api/jobs/run")"
+  [ "$code" = "403" ] || { echo "warehouse chay job tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "thong bao: cap ton thap -> low-stock-scan -> stock.low dung kho, ma het han 2 ngay -> promo-expiry-scan -> promotion.expiring, job fail -> retry -> sent, RBAC 403" notif_scan_va_retry_rbac
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \

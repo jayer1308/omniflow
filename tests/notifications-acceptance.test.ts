@@ -1482,11 +1482,11 @@ test('AC-3 audit job fail 3 lan dung 1 notification-failed + 1 job-failed, detai
 
 test('AC-3 gui thanh cong khong tang so ban ghi audit', async () => {
   const ctx = await notifCtx();
-  const before = auditRows(ctx.db, ctx.orgId).length;
   const order = await mustOrder250(ctx);
   await mustCompletedOrder(ctx, order.id as number);
   const code = order.code as string;
   expect(jobsByEventKey(ctx.db, `order.completed:${code}`).length).toBe(1);
+  const before = auditRows(ctx.db, ctx.orgId).length;
   processDueJobs(ctx.db, new Date());
   expect(notificationsByEventKey(ctx.db, `order.completed:${code}`).length).toBe(1);
   expect(notificationsByEventKey(ctx.db, `order.completed:${code}`)[0].status).toBe('sent');
