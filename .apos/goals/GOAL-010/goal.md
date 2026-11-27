@@ -1,6 +1,6 @@
 # GOAL-010 v1: OmniFlow co bao cao + doi soat tren du lieu that da co: bao cao doanh thu theo kenh/chi nhanh/san pham/danh muc/thoi gian (mac dinh thang hien tai, chi tinh don completed, thoi gian theo thoi diem hoan tat tu order_events, hien thi Asia/Ho_Chi_Minh); bao cao ton kho + bien dong + canh bao ton thap; doi soat 3 mat kho–don–thanh toan (le th liet ke tung dong kem so ky vong vs thuc te, du lieu mau da biet cho 0 dong error); bao cao khuyen mai da dung + diem da doi; xuat CSV cho moi bao cao (so lieu khop API JSON); phan quyen xem bao cao theo vai + scope chi nhanh/kho (accountant toan org, sales chi chi nhanh minh, warehouse chi bao cao ton theo kho duoc gan); audit log cho xuat bao cao; bao cao tinh o service, khong luu bang tong rieng; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc bao cao moi; 3 yeu cau mo coi khuyen mai (R-18 GOAL-006, R-16 GOAL-007, R-17 GOAL-008) duoc loai tru co ly do (out-of-scope)
 
-Status: testing
+Status: verified
 
 ```json
 {
