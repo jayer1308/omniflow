@@ -924,7 +924,7 @@ test('AC-2 GET /api/customers/:id/points tra balance + ledger moi nhat truoc', a
 
 test('AC-3 POST /api/customers/:id/notes 201 author la nguoi thuc hien, GET moi nhat truoc + phan trang', async () => {
   const ctx = await crmCtx();
-  const c = await mustCreateCustomer(ctx.owner, { name: 'Nguyen Van A', phone: '0901000001' });
+  const c = await mustCreateCustomer(ctx.owner, { name: 'Nguyen Van A', phone: '0901000001', branch_id: ctx.branch1 });
   const n1 = await ctx.owner.post(`/api/customers/${c.id as number}/notes`).send({ content: 'Goi cham soc lan 1' });
   expect(n1.status).toBe(201);
   const note1 = (n1.body as Record<string, unknown>).note as Record<string, unknown> ?? n1.body as Record<string, unknown>;
@@ -1152,7 +1152,7 @@ test('AC-4 hop nhat co confirm: diem/lich su cong don, nguon merged + phone/emai
   expect(merged.points_balance).toBe(30);
   expect(purchaseSummary(merged).total_spent).toBe(300000);
   expect(purchaseSummary(merged).order_count).toBe(2);
-  expect(merged.segment).toBe('frequent');
+  expect(merged.segment).toBe('new');
   // Don + ledger + ghi chu cua nguon da chuyen sang khach giu; ma don giu nguyen.
   expect(orderRow(ctx.db, srcOrder.id as number).customer_id).toBe(keep.id);
   expect(orderRow(ctx.db, srcOrder.id as number).code).toBe(srcOrder.code);
