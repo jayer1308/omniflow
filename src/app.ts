@@ -4737,5 +4737,28 @@ export function createApp(db: DatabaseSync): Express {
     },
   );
 
+  // ---------- Khuyen mai (GOAL-009) — STUB cua Tester ----------
+  // Worker implement that 5 endpoint + migration 014; stub tra 501 de
+  // test khoa do dung ly do (thieu tinh nang), khong phai loi setup.
+  function promoNotImplemented(res: Response): void {
+    res.status(501).json({ error: 'not implemented: khuyen mai chua co' });
+  }
+
+  app.post('/api/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
+    promoNotImplemented(res);
+  });
+  app.patch('/api/promotions/:id', requireAuth, (_req: TenantRequest, res: Response) => {
+    promoNotImplemented(res);
+  });
+  app.get('/api/promotions', requireAuth, (_req: TenantRequest, res: Response) => {
+    promoNotImplemented(res);
+  });
+  app.get('/api/promotions/:id', requireAuth, (_req: TenantRequest, res: Response) => {
+    promoNotImplemented(res);
+  });
+  app.post('/api/orders/:id/promotion', requireAuth, (_req: TenantRequest, res: Response) => {
+    promoNotImplemented(res);
+  });
+
   return app;
 }

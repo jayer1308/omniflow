@@ -1,0 +1,77 @@
+[
+  {
+    "acceptanceId": "AC-1",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/promotions-acceptance.test.ts::AC-1 migration 014 tao du 2 bang khuyen mai + cot orders promotion_id promo_discount",
+      "tests/promotions-acceptance.test.ts::AC-1 POST api promotions 201 ma chuan hoa UPPERCASE trim kem used_count 0",
+      "tests/promotions-acceptance.test.ts::AC-1 POST trung ma trong org 409, cung ma org B 201",
+      "tests/promotions-acceptance.test.ts::AC-1 POST sai validate code type value: code trong qua 50 ky tu type la percent ngoai 1-100 fixed nho hon 1",
+      "tests/promotions-acceptance.test.ts::AC-1 POST sai validate cap min gioi han: cap voi fixed cap nho hon 1 min am gioi han nho hon 1",
+      "tests/promotions-acceptance.test.ts::AC-1 POST sai validate kenh thoi gian: channels rong la valid_from valid_to sai dinh dang hoac valid_from lon hon valid_to",
+      "tests/promotions-acceptance.test.ts::AC-1 POST branch khong ton tai 404 branch org B 403",
+      "tests/promotions-acceptance.test.ts::AC-1 PATCH sua value cap min_order_total 200 gui code 400",
+      "tests/promotions-acceptance.test.ts::AC-1 PATCH khoa mo ma: locked 200 roi ap ma 400 mo lai active 200 roi ap duoc",
+      "tests/promotions-acceptance.test.ts::AC-1 PATCH ma khong ton tai 404 ma org B 403 PATCH percent 150 400 PATCH cap voi fixed 400",
+      "tests/promotions-acceptance.test.ts::AC-1 GET list loc code status channel branch phan trang limit offset kem total moi nhat truoc",
+      "tests/promotions-acceptance.test.ts::AC-1 GET list status la 400 channel la 400 branch khong ton tai 404 branch org B 403",
+      "tests/promotions-acceptance.test.ts::AC-1 GET detail kem used_count usage_limit per_customer_limit ma khong ton tai 404 ma org B 403"
+    ]
+  },
+  {
+    "acceptanceId": "AC-2",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/promotions-acceptance.test.ts::AC-2 ham thuan calculateDiscount percent cap fixed cat tong va cat phan con lai sau diem",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma 10 cap 20000 cho don 250000 giam 20000 tong goc khong doi usage ghi dung",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma fixed 100000 cho don 50000 giam 50000 cat o tong don",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma fixed 30000 cho don 100000 giam 30000",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma sai kenh 400 sai chi nhanh 400",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma het han 400 chua toi han 400",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma tong don duoi min_order_total 400",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma cho don khong draft 400",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma lan 2 cung don 400 promo_discount khong doi",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma khong ton tai 404 don khong ton tai 404 don org A bang user org B 403 ma org B 404",
+      "tests/promotions-acceptance.test.ts::AC-2 ap ma bi khoa 400",
+      "tests/promotions-acceptance.test.ts::AC-2 het luot tong usage_limit 2 ap 2 lan 201 lan 3 400 don khong doi",
+      "tests/promotions-acceptance.test.ts::AC-2 het luot moi khach per_customer_limit 1 ap lan 2 cung khach 400 khach khac ap duoc",
+      "tests/promotions-acceptance.test.ts::AC-2 don khong gan khach chi tinh gioi han tong per_customer_limit 1 usage_limit 2 ap 2 don 201 lan 3 400",
+      "tests/promotions-acceptance.test.ts::AC-2 ap dong thoi 10 lan ma gioi han 5 dung 5 thanh cong used_count 5"
+    ]
+  },
+  {
+    "acceptanceId": "AC-3",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/promotions-acceptance.test.ts::AC-3 chong giam ma truoc diem sau ma 20 khong cap cong 200 diem don 100000 tong giam 40000",
+      "tests/promotions-acceptance.test.ts::AC-3 chong giam diem truoc ma sau ma 20 khong cap cong 200 diem don 100000 tong giam 40000",
+      "tests/promotions-acceptance.test.ts::AC-3 chong giam bao hoa ma truoc ma 50 cong 900 diem don 100000 tong giam 100000 outstanding 0 payment_status unpaid",
+      "tests/promotions-acceptance.test.ts::AC-3 chong giam bao hoa diem truoc ma 50 cong 900 diem don 100000 tong giam 100000 outstanding 0",
+      "tests/promotions-acceptance.test.ts::AC-3 doi diem tren don da co ma bi cat o total tru promo_discount ma fixed 30000 doi 900 diem giam 70000",
+      "tests/promotions-acceptance.test.ts::AC-3 huy don co ma usage released promo_discount 0 promotion_id NULL ap lai duoc",
+      "tests/promotions-acceptance.test.ts::AC-3 tra hang hoan tien khong hoan luot dung usage van used promo_discount giu nguyen",
+      "tests/promotions-acceptance.test.ts::AC-3 hoan tien truc tiep khong hoan luot dung usage van used",
+      "tests/promotions-acceptance.test.ts::AC-3 doi soat don 250000 ma 20000 diem 1000 tra 100000 outstanding 129000 payment_status partially_paid",
+      "tests/promotions-acceptance.test.ts::AC-3 tich diem tren tong goc don 250000 ap ma 10 hoan tat tich 25 diem"
+    ]
+  },
+  {
+    "acceptanceId": "AC-4",
+    "part": "app",
+    "layer": "L2",
+    "testIds": [
+      "tests/promotions-acceptance.test.ts::AC-4 can 4 actions khuyen mai theo dung ma tran brief",
+      "tests/promotions-acceptance.test.ts::AC-4 RBAC 403 qua HTTP theo tung o cam trong ma tran khuyen mai",
+      "tests/promotions-acceptance.test.ts::AC-4 RBAC duong manager tao 201 accountant xem 200 sales xem ma khong gioi han chi nhanh 200 sales ap ma don dung chi nhanh 201",
+      "tests/promotions-acceptance.test.ts::AC-4 audit log ghi tao sua khoa ap ma voi user_id created_at detail sales xem log 403 detail khong chua thong tin the",
+      "tests/promotions-acceptance.test.ts::AC-4 audit log ghi hoan luot dung khi huy don co ban ghi promotion-usage-released hoac cancel-order kem ma khuyen mai",
+      "tests/promotions-acceptance.test.ts::AC-4 idempotency tao ma gui lai cung key replayed true khong tao ma moi",
+      "tests/promotions-acceptance.test.ts::AC-4 idempotency ap ma gui lai cung key header replayed true khong ghi usage moi promo_discount khong doi",
+      "tests/promotions-acceptance.test.ts::AC-4 idempotency ap ma bang idempotency_key trong body gui lai replayed true khong ghi usage moi",
+      "tests/promotions-acceptance.test.ts::AC-4 lich su dung ma tao ap huy ap lai dung thu tu du buoc khong dong thua"
+    ]
+  }
+]

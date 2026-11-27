@@ -106,7 +106,17 @@ export type Action =
   | 'add-note'
   | 'merge-customers'
   | 'export-customer'
-  | 'delete-customer';
+  | 'delete-customer'
+  // GOAL-009 (STUB cua Tester): ma tran khuyen mai (docs/RBAC.md).
+  // can() chua co case cho 4 action nay nen mac dinh tra false; Worker
+  // implement dung ma tran brief (tao/sua: chi owner/manager; ap ma:
+  // owner/manager toan org, sales chi don thuoc chi nhanh minh; xem:
+  // owner/manager/accountant toan org, sales chi ma branch_id NULL hoac
+  // dung chi nhanh minh, warehouse 403).
+  | 'create-promotion'
+  | 'update-promotion'
+  | 'apply-promotion'
+  | 'view-promotions';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.
