@@ -133,7 +133,16 @@ export type Action =
   | 'view-notifications'
   | 'manage-notification-preferences'
   | 'view-jobs'
-  | 'run-jobs';
+  | 'run-jobs'
+  // GOAL-012 (STUB cua Tester): ma tran dashboard/van hanh (docs/RBAC.md, D30).
+  // can() chua co case cho 3 action nay nen mac dinh tra false; Worker
+  // implement dung ma tran brief-012 yeu cau 10 (owner/manager toan org;
+  // sales chi dashboard chi nhanh minh, xem van hanh -> 403; warehouse chi
+  // phan ton kho/giao hang thuoc kho duoc gan, xem doanh thu -> 403;
+  // accountant xem dashboard doanh thu toan org chi xem, chay backup -> 403).
+  | 'view-dashboard'
+  | 'view-ops'
+  | 'run-backup';
 
 /**
  * true khi branch của target nằm trong phạm vi của actor.

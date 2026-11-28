@@ -5793,5 +5793,36 @@ export function createApp(db: DatabaseSync): Express {
     res.json({ job: serializeJob(updated) });
   });
 
+  // ---------- Dashboard + van hanh (GOAL-012, STUB cua Tester) ----------
+  // 7 endpoint moi tra 501 'not implemented'; Worker implement day du
+  // (routes + RBAC + audit) theo brief-012.md. Test moi do dung ly do.
+  app.get('/dashboard', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.get('/dashboard/shipments', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.get('/dashboard/customers', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.get('/dashboard/notifications', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.get('/ops/backup', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.post('/api/ops/backup', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
+  app.post('/api/ops/restore', requireAuth, (_req: TenantRequest, res: Response) => {
+    res.status(501).json({ error: 'not implemented' });
+  });
+
   return app;
 }
