@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
@@ -1318,6 +1320,15 @@ export function createApp(db: DatabaseSync): Express {
   const app = express();
   // Đường dẫn views/public tính từ thư mục repo (nơi chạy npm start / vitest).
   const baseDir = process.cwd();
+  // GOAL-012 (R-5): version đọc từ package.json lúc khởi động, không hard-code.
+  let appVersion = '0.0.0';
+  try {
+    appVersion = (
+      JSON.parse(readFileSync(join(baseDir, 'package.json'), 'utf8')) as { version: string }
+    ).version;
+  } catch {
+    appVersion = '0.0.0';
+  }
   app.set('view engine', 'ejs');
   app.set('views', join(baseDir, 'views'));
   app.use(express.json());
@@ -1386,8 +1397,26 @@ export function createApp(db: DatabaseSync): Express {
     next();
   }
 
+  // GOAL-012 (R-5): health mở rộng — giữ {status: 'ok'} khi DB ok, thêm
+  // db (kiểm tra kết nối SQLite thật bằng SELECT 1), version (từ
+  // package.json) và uptime_seconds (từ lúc process start). DB lỗi ->
+  // status 'error' + 503.
   app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok' });
+    let dbOk = false;
+    try {
+      db.prepare('SELECT 1 AS one').get();
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+    const body = {
+      status: dbOk ? 'ok' : 'error',
+      db: dbOk ? 'ok' : 'error',
+      version: appVersion,
+      uptime_seconds: Math.floor(process.uptime()),
+    };
+    if (dbOk) res.json(body);
+    else res.status(503).json(body);
   });
 
   app.get('/', (req: TenantRequest, res: Response) => {
@@ -1851,13 +1880,92 @@ export function createApp(db: DatabaseSync): Express {
     res.json(visibleAuditRows(db, actor));
   });
 
+  // GOAL-012 (R-7): mở rộng GET /audit-log đã có — thêm lọc actor= (id
+  // người dùng, số), action=, from=/to= (YYYY-MM-DD, theo Asia/Ho_Chi_Minh)
+  // + phân trang page/limit (mặc định page 1, limit 20, tối đa 100). Lọc
+  // sai giá trị -> 400. Giữ hành vi cũ (owner/manager only, ngoài vai ->
+  // 403; nội dung log không đổi; manager vẫn chỉ thấy bản ghi trong phạm
+  // vi của mình qua visibleAuditRows).
   app.get('/audit-log', requireAuth, (req: TenantRequest, res: Response) => {
     const actor = req.user as SessionUser;
     if (actor.role !== 'owner' && actor.role !== 'manager') {
       res.status(403).json({ error: 'Chỉ chủ doanh nghiệp và quản lý được xem nhật ký' });
       return;
     }
-    res.render('audit-log', { user: actor, logs: visibleAuditRows(db, actor) });
+    const q = req.query as Record<string, unknown>;
+    let actorFilter: number | undefined;
+    if (q.actor !== undefined) {
+      if (typeof q.actor !== 'string' || !/^\d+$/.test(q.actor)) {
+        res.status(400).json({ error: 'actor phải là id người dùng (số)' });
+        return;
+      }
+      actorFilter = Number(q.actor);
+    }
+    const actionFilter =
+      typeof q.action === 'string' && q.action.length > 0 ? q.action : undefined;
+    const fromStr = typeof q.from === 'string' && q.from.length > 0 ? q.from : undefined;
+    const toStr = typeof q.to === 'string' && q.to.length > 0 ? q.to : undefined;
+    if (
+      (fromStr !== undefined && !isValidDate012(fromStr)) ||
+      (toStr !== undefined && !isValidDate012(toStr))
+    ) {
+      res.status(400).json({ error: 'from/to phải có định dạng YYYY-MM-DD hợp lệ' });
+      return;
+    }
+    if (fromStr !== undefined && toStr !== undefined && fromStr > toStr) {
+      res.status(400).json({ error: 'from phải <= to' });
+      return;
+    }
+    let page = 1;
+    let limit = 20;
+    if (q.page !== undefined) {
+      if (typeof q.page !== 'string' || !/^\d+$/.test(q.page) || Number(q.page) < 1) {
+        res.status(400).json({ error: 'page phải là số nguyên >= 1' });
+        return;
+      }
+      page = Number(q.page);
+    }
+    if (q.limit !== undefined) {
+      if (typeof q.limit !== 'string' || !/^\d+$/.test(q.limit)) {
+        res.status(400).json({ error: 'limit phải là số nguyên' });
+        return;
+      }
+      limit = Number(q.limit);
+      if (limit < 1 || limit > 100) {
+        res.status(400).json({ error: 'limit phải từ 1 đến 100' });
+        return;
+      }
+    }
+    let rows = visibleAuditRows(db, actor);
+    if (actorFilter !== undefined) rows = rows.filter((r) => r.user_id === actorFilter);
+    if (actionFilter !== undefined) rows = rows.filter((r) => r.action === actionFilter);
+    if (fromStr !== undefined || toStr !== undefined) {
+      const { start, end } = utcRangeForHcmDays012(
+        fromStr ?? '1970-01-01',
+        toStr ?? '2999-12-31',
+      );
+      rows = rows.filter((r) => r.created_at >= start && r.created_at < end);
+    }
+    const total = rows.length;
+    const pageRows = rows.slice((page - 1) * limit, page * limit);
+    const qs = new URLSearchParams();
+    if (actorFilter !== undefined) qs.set('actor', String(actorFilter));
+    if (actionFilter !== undefined) qs.set('action', actionFilter);
+    if (fromStr !== undefined) qs.set('from', fromStr);
+    if (toStr !== undefined) qs.set('to', toStr);
+    qs.set('limit', String(limit));
+    res.render('audit-log', {
+      user: actor,
+      logs: pageRows,
+      total,
+      page,
+      limit,
+      actor: actorFilter ?? '',
+      action: actionFilter ?? '',
+      from: fromStr ?? '',
+      to: toStr ?? '',
+      baseQuery: qs.toString(),
+    });
   });
 
   // ---------- Sản phẩm / giá / CSV (GOAL-003) ----------
@@ -5793,35 +5901,523 @@ export function createApp(db: DatabaseSync): Express {
     res.json({ job: serializeJob(updated) });
   });
 
-  // ---------- Dashboard + van hanh (GOAL-012, STUB cua Tester) ----------
-  // 7 endpoint moi tra 501 'not implemented'; Worker implement day du
-  // (routes + RBAC + audit) theo brief-012.md. Test moi do dung ly do.
-  app.get('/dashboard', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  // ---------- Dashboard + van hanh (GOAL-012, D30) ----------
+  // So lieu dashboard lay tu service da co (computeRevenueReport GOAL-010,
+  // computeStockReport GOAL-004, bang orders GOAL-005, bang notifications
+  // GOAL-011, computePointsReport + customerView GOAL-008); KHONG tinh lai
+  // bang SQL rieng gay lech. Backup/restore CHI bọc scripts/backup.sh +
+  // restore.sh GOAL-001, khong viet logic sao luu moi.
+  const hcmDayFmt012 = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
   });
 
-  app.get('/dashboard/shipments', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  function hcmToday012(d = new Date()): string {
+    return hcmDayFmt012.format(d);
+  }
+
+  function hcmFirstOfMonth012(): string {
+    return `${hcmToday012().slice(0, 7)}-01`;
+  }
+
+  function vnd012(n: number): string {
+    return n.toLocaleString('vi-VN');
+  }
+
+  function isValidDate012(value: string): boolean {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!m) return false;
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (month < 1 || month > 12 || day < 1) return false;
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day <= daysInMonth;
+  }
+
+  /** Khoang UTC [start, end) tuong ung from/to theo Asia/Ho_Chi_Minh. */
+  function utcRangeForHcmDays012(from: string, to: string): { start: string; end: string } {
+    const start = new Date(`${from}T00:00:00+07:00`).toISOString();
+    const end = new Date(
+      new Date(`${to}T00:00:00+07:00`).getTime() + 24 * 60 * 60 * 1000,
+    ).toISOString();
+    return { start, end };
+  }
+
+  /** Map loi nghiep vu dashboard (tien to bad_request/not_found/forbidden)
+   * sang HTTP; loi khac -> 500 khong lo stack trace. */
+  function dashFail(res: Response, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('not_found')) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('forbidden')) {
+      res.status(403).json({ error: msg });
+      return;
+    }
+    if (msg.startsWith('bad_request')) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res
+      .status(500)
+      .send(
+        '<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">' +
+          '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+          '<title>Lỗi</title><link rel="stylesheet" href="/style.css"></head>' +
+          '<body><main><h1>Đã xảy ra lỗi</h1><p>Vui lòng thử lại sau.</p>' +
+          '<p><a href="/dashboard">Về trang tổng quan</a></p></main></body></html>',
+      );
+  }
+
+  function dashForbidden(message: string): Error {
+    return new Error(`forbidden: ${message}`);
+  }
+
+  /**
+   * Chi nhanh dashboard dang xem: ?branch_id= neu co (phai ton tai, thuoc
+   * org, va can(view-dashboard) cho phep); khong co thi sales = chi nhanh
+   * minh, owner/manager/accountant = toan org (undefined). Warehouse goi
+   * ham nay se bi chan o can() vi can(view-dashboard) tra false.
+   */
+  function dashboardBranch(req: TenantRequest, actor: SessionUser): number | undefined {
+    const raw = req.query.branch_id;
+    if (raw !== undefined) {
+      if (typeof raw !== 'string') throw new Error('bad_request: branch_id không hợp lệ');
+      const id = Number(raw);
+      if (!Number.isInteger(id)) throw new Error('bad_request: branch_id không hợp lệ');
+      const row = db.prepare('SELECT org_id FROM branches WHERE id = ?').get(id) as
+        | { org_id: number }
+        | undefined;
+      if (!row) throw new Error('not_found: không tìm thấy chi nhánh');
+      if (row.org_id !== actor.orgId) {
+        throw dashForbidden('chi nhánh không thuộc doanh nghiệp của bạn');
+      }
+      if (!can(actor, 'view-dashboard', { orgId: actor.orgId, branchId: id })) {
+        throw dashForbidden('bạn không được phép xem dashboard của chi nhánh này');
+      }
+      return id;
+    }
+    if (
+      !can(actor, 'view-dashboard', { orgId: actor.orgId, branchId: actor.branchId ?? null })
+    ) {
+      throw dashForbidden('bạn không được phép xem dashboard');
+    }
+    return actor.role === 'sales' ? (actor.branchId ?? undefined) : undefined;
+  }
+
+  interface PendingOrderRow {
+    id: number;
+    code: string;
+    status: string;
+    branch_id: number;
+    warehouse_id: number;
+    total: number;
+  }
+
+  interface DashboardData {
+    revenueToday: number;
+    revenueMonth: number;
+    pendingByStatus: { draft: number; confirmed: number; processing: number };
+    pendingOrders: PendingOrderRow[];
+    lowStock: { sku: string; product_name: string; warehouse_name: string; available: number; min_stock: number }[];
+    unreadCount: number;
+    recentNotifications: NotificationRow[];
+  }
+
+  /** So lieu dashboard theo pham vi (chi nhanh neu co, khong thi toan org). */
+  function dashboardData(actor: SessionUser, branchId: number | undefined): DashboardData {
+    const today = hcmToday012();
+    const first = hcmFirstOfMonth012();
+    const revToday = computeRevenueReport(db, { from: today, to: today, branchId });
+    const revMonth = computeRevenueReport(db, { from: first, to: today, branchId });
+    let pending = db
+      .prepare(
+        `SELECT id, code, status, branch_id, warehouse_id, total FROM orders
+         WHERE org_id = ? AND status IN ('draft', 'confirmed', 'processing') ORDER BY id`,
+      )
+      .all(actor.orgId) as unknown as PendingOrderRow[];
+    if (branchId !== undefined) pending = pending.filter((o) => o.branch_id === branchId);
+    const stock = computeStockReport(db, {});
+    const branchByWarehouse = new Map<number, number | null>();
+    for (const w of db.prepare('SELECT id, branch_id FROM warehouses').all() as {
+      id: number;
+      branch_id: number | null;
+    }[]) {
+      branchByWarehouse.set(w.id, w.branch_id);
+    }
+    let low = stock.low_stock;
+    if (branchId !== undefined) {
+      low = low.filter((l) => branchByWarehouse.get(l.warehouse_id) === branchId);
+    }
+    let notifs = db
+      .prepare('SELECT * FROM notifications WHERE org_id = ? ORDER BY id DESC')
+      .all(actor.orgId) as unknown as NotificationRow[];
+    notifs = notifs.filter((r) => notificationVisibleTo(actor, r));
+    // D30: "chua doc" = notification status sent tao sau lan cuoi user mo
+    // trang /dashboard/notifications (luu trong bo nho tien trinh theo
+    // user, khong them cot DB); chua mo lan nao -> moi sent deu chua doc.
+    const seenAt = dashboardSeenAt.get(actor.id);
+    const unreadCount = notifs.filter(
+      (r) => r.status === 'sent' && (seenAt === undefined || r.created_at > seenAt),
+    ).length;
+    return {
+      revenueToday: revToday.totals.gross_revenue,
+      revenueMonth: revMonth.totals.gross_revenue,
+      pendingByStatus: {
+        draft: pending.filter((o) => o.status === 'draft').length,
+        confirmed: pending.filter((o) => o.status === 'confirmed').length,
+        processing: pending.filter((o) => o.status === 'processing').length,
+      },
+      pendingOrders: pending,
+      lowStock: low.map((l) => ({
+        sku: l.sku,
+        product_name: l.product_name,
+        warehouse_name: l.warehouse_name,
+        available: l.available,
+        min_stock: l.min_stock,
+      })),
+      unreadCount,
+      recentNotifications: notifs.slice(0, 10),
+    };
+  }
+
+  /** D30: moc "da xem" thong bao theo user (bo nho tien trinh, xem
+   * dashboardData). Dat khi user mo trang /dashboard/notifications. */
+  const dashboardSeenAt = new Map<number, string>();
+
+  app.get('/dashboard', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      const branchId = dashboardBranch(req, actor);
+      const data = dashboardData(actor, branchId);
+      res.render('dashboard', {
+        user: actor,
+        branchId: branchId ?? null,
+        revenueToday: data.revenueToday,
+        revenueMonth: data.revenueMonth,
+        revenueTodayText: vnd012(data.revenueToday),
+        revenueMonthText: vnd012(data.revenueMonth),
+        pendingByStatus: data.pendingByStatus,
+        pendingOrders: data.pendingOrders,
+        lowStock: data.lowStock,
+        unreadCount: data.unreadCount,
+        recentNotifications: data.recentNotifications,
+      });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
-  app.get('/dashboard/customers', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  interface ShipmentOverviewRow {
+    id: number;
+    order_id: number;
+    order_code: string;
+    carrier: string;
+    tracking_code: string;
+    status: string;
+    branch_id: number;
+    warehouse_id: number;
+  }
+
+  interface ReturnOverviewRow {
+    id: number;
+    order_id: number;
+    order_code: string;
+    code: string;
+    reason: string;
+    status: string;
+    branch_id: number;
+    warehouse_id: number;
+  }
+
+  app.get('/dashboard/shipments', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      let branchId: number | undefined;
+      let warehouseId: number | undefined;
+      if (actor.role === 'warehouse') {
+        warehouseId = actor.warehouseId ?? undefined;
+      } else {
+        branchId = dashboardBranch(req, actor);
+      }
+      const inTransit = db
+        .prepare(
+          `SELECT s.id AS id, s.order_id AS order_id, s.carrier AS carrier,
+                  s.tracking_code AS tracking_code, s.status AS status,
+                  o.code AS order_code, o.branch_id AS branch_id, o.warehouse_id AS warehouse_id
+           FROM shipments s JOIN orders o ON o.id = s.order_id
+           WHERE s.org_id = ? AND s.status IN ('requested', 'shipped', 'in_transit')
+           ORDER BY s.id DESC`,
+        )
+        .all(actor.orgId) as unknown as ShipmentOverviewRow[];
+      const pendingReturns = db
+        .prepare(
+          `SELECT r.id AS id, r.order_id AS order_id, r.code AS code, r.reason AS reason,
+                  r.status AS status, o.code AS order_code, o.branch_id AS branch_id,
+                  o.warehouse_id AS warehouse_id
+           FROM returns r JOIN orders o ON o.id = r.order_id
+           WHERE r.org_id = ? AND r.status = 'requested' ORDER BY r.id DESC`,
+        )
+        .all(actor.orgId) as unknown as ReturnOverviewRow[];
+      const receivedReturns = db
+        .prepare(
+          `SELECT r.id AS id, r.order_id AS order_id, r.code AS code, r.reason AS reason,
+                  r.status AS status, o.code AS order_code, o.branch_id AS branch_id,
+                  o.warehouse_id AS warehouse_id
+           FROM returns r JOIN orders o ON o.id = r.order_id
+           WHERE r.org_id = ? AND r.status = 'received' ORDER BY r.id DESC LIMIT 5`,
+        )
+        .all(actor.orgId) as unknown as ReturnOverviewRow[];
+      const inScope = <T extends { branch_id: number; warehouse_id: number }>(rows: T[]): T[] =>
+        rows.filter(
+          (r) =>
+            (branchId === undefined || r.branch_id === branchId) &&
+            (warehouseId === undefined || r.warehouse_id === warehouseId),
+        );
+      res.render('dashboard-shipments', {
+        user: actor,
+        shipments: inScope(inTransit),
+        pendingReturns: inScope(pendingReturns),
+        receivedReturns: inScope(receivedReturns),
+      });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
-  app.get('/dashboard/notifications', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/dashboard/customers', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      // Warehouse khong xem man hinh khach (chi phan ton kho/giao hang):
+      // dashboardBranch chan qua can(view-dashboard) = false.
+      const branchId = dashboardBranch(req, actor);
+      const today = hcmToday012();
+      const first = hcmFirstOfMonth012();
+      const { customers: vips } = listCustomers(db, actor, {
+        segment: 'vip',
+        branch_id: branchId ?? undefined,
+        limit: 100,
+      });
+      const points = computePointsReport(db, { from: first, to: today });
+      const { start, end } = utcRangeForHcmDays012(first, today);
+      const newRow = db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM customers
+           WHERE org_id = ? AND status = 'active' AND created_at >= ? AND created_at < ?
+           ${branchId !== undefined ? 'AND branch_id = ?' : ''}`,
+        )
+        .get(
+          actor.orgId,
+          start,
+          end,
+          ...(branchId !== undefined ? [branchId] : []),
+        ) as { c: number };
+      res.render('dashboard-customers', {
+        user: actor,
+        vips,
+        redeemedPoints: points.totals.redeemed_total,
+        redeemedAmount: points.totals.redeemed_amount,
+        redeemedAmountText: vnd012(points.totals.redeemed_amount),
+        newCustomers: newRow.c,
+      });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
-  app.get('/ops/backup', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.get('/dashboard/notifications', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      // Trang thong bao/job: owner/manager/accountant toan org; sales chi
+      // chi nhanh minh (loc them bang notificationVisibleTo); warehouse
+      // chi xem thong bao stock.low + job low-stock-scan (loc o duoi).
+      if (actor.role === 'sales') {
+        dashboardBranch(req, actor);
+      } else if (actor.role === 'warehouse') {
+        // Duoc xem (khong chan o day); loc du lieu theo kho o duoi.
+      } else if (
+        !can(actor, 'view-dashboard', { orgId: actor.orgId, branchId: actor.branchId ?? null })
+      ) {
+        throw dashForbidden('bạn không được phép xem trang thông báo');
+      }
+      let notifs = db
+        .prepare('SELECT * FROM notifications WHERE org_id = ? ORDER BY id DESC LIMIT 10')
+        .all(actor.orgId) as unknown as NotificationRow[];
+      notifs = notifs.filter((r) => notificationVisibleTo(actor, r));
+      let failedJobs = db
+        .prepare("SELECT * FROM jobs WHERE status = 'failed' ORDER BY id DESC")
+        .all() as unknown as JobRow[];
+      failedJobs = failedJobs.filter((j) => {
+        if (j.type !== 'send-notification') return true;
+        const orgId = deriveJobOrg(db, parseJobPayload(j.payload));
+        return orgId === null || orgId === actor.orgId;
+      });
+      if (actor.role === 'sales' || actor.role === 'accountant') failedJobs = [];
+      if (actor.role === 'warehouse') {
+        failedJobs = failedJobs.filter((j) => j.type === 'low-stock-scan');
+      }
+      // Mo trang nay = da xem thong bao (D30): cap nhat moc "da xem".
+      dashboardSeenAt.set(actor.id, new Date().toISOString());
+      res.render('dashboard-notifications', {
+        user: actor,
+        notifications: notifs,
+        failedJobs,
+      });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
-  app.post('/api/ops/backup', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  // ---------- Sao luu / khoi phuc (GOAL-012, R-6) ----------
+  // CHI bọc scripts/backup.sh + restore.sh GOAL-001. Thu muc backup mac
+  // dinh: <repo>/backups. R-6 owner-only ghi de dong tong quat cua R-10:
+  // GET /ops/backup + 2 API deu chi owner (manager cung 403).
+  const BACKUP_DIR = join(baseDir, 'backups');
+
+  /** Duong dan file DB SQLite dang mo (qua PRAGMA database_list); null khi
+   * la DB :memory: (khong co file de sao luu). */
+  function dbFilePath(): string | null {
+    try {
+      const row = db
+        .prepare("SELECT file AS file FROM pragma_database_list WHERE name = 'main'")
+        .get() as { file: string } | undefined;
+      if (!row || !row.file) return null;
+      return row.file;
+    } catch {
+      return null;
+    }
+  }
+
+  interface LatestBackup {
+    file: string;
+    name: string;
+    size: number;
+    created_at: string;
+  }
+
+  function latestBackup(): LatestBackup | null {
+    try {
+      if (!existsSync(BACKUP_DIR)) return null;
+      let best: LatestBackup | null = null;
+      let bestMtime = -1;
+      for (const name of readdirSync(BACKUP_DIR)) {
+        if (!name.endsWith('.db')) continue;
+        const full = join(BACKUP_DIR, name);
+        let st: { isFile(): boolean; size: number; mtimeMs: number; mtime: Date };
+        try {
+          st = statSync(full);
+        } catch {
+          continue;
+        }
+        if (!st.isFile()) continue;
+        if (st.mtimeMs > bestMtime) {
+          bestMtime = st.mtimeMs;
+          best = {
+            file: `backups/${name}`,
+            name,
+            size: st.size,
+            created_at: st.mtime.toISOString(),
+          };
+        }
+      }
+      return best;
+    } catch {
+      return null;
+    }
+  }
+
+  app.get('/ops/backup', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      if (!can(actor, 'run-backup', { orgId: actor.orgId })) {
+        throw dashForbidden('chỉ chủ doanh nghiệp mới được xem trang sao lưu');
+      }
+      res.render('ops-backup', { user: actor, latest: latestBackup() });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
-  app.post('/api/ops/restore', requireAuth, (_req: TenantRequest, res: Response) => {
-    res.status(501).json({ error: 'not implemented' });
+  app.post('/api/ops/backup', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      if (!can(actor, 'run-backup', { orgId: actor.orgId })) {
+        throw dashForbidden('chỉ chủ doanh nghiệp mới được sao lưu');
+      }
+      const dbPath = dbFilePath();
+      if (dbPath === null) {
+        res.status(400).json({ error: 'không sao lưu được cơ sở dữ liệu trong bộ nhớ' });
+        return;
+      }
+      mkdirSync(BACKUP_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+      const rand = Math.random().toString(36).slice(2, 8);
+      const name = `omniflow-${stamp}-${rand}.db`;
+      const outPath = join(BACKUP_DIR, name);
+      execFileSync('bash', [join(baseDir, 'scripts', 'backup.sh'), dbPath, outPath], {
+        cwd: baseDir,
+        stdio: 'pipe',
+      });
+      const size = statSync(outPath).size;
+      const created_at = new Date().toISOString();
+      writeAudit(db, actor.orgId, actor.id, 'create-backup', { file: `backups/${name}`, size });
+      res.status(201).json({ file: `backups/${name}`, size, created_at });
+    } catch (err) {
+      dashFail(res, err);
+    }
+  });
+
+  app.post('/api/ops/restore', requireAuth, (req: TenantRequest, res: Response) => {
+    const actor = req.user as SessionUser;
+    try {
+      if (!can(actor, 'run-backup', { orgId: actor.orgId })) {
+        throw dashForbidden('chỉ chủ doanh nghiệp mới được khôi phục');
+      }
+      const body = (req.body ?? {}) as { file?: unknown; confirm?: unknown };
+      if (body.confirm !== true && body.confirm !== 'true') {
+        res.status(400).json({ error: 'khôi phục yêu cầu xác nhận confirm: true' });
+        return;
+      }
+      if (typeof body.file !== 'string' || body.file.length === 0) {
+        res.status(400).json({ error: 'file sao lưu bắt buộc' });
+        return;
+      }
+      const raw = body.file;
+      // Chi nhan file nam trong thu muc backup mac dinh: tu choi duong dan
+      // tuyet doi, '..' (path traversal) va duong dan con bat ky.
+      if (raw.startsWith('/') || raw.includes('..') || raw.includes('\\')) {
+        res.status(400).json({ error: 'file sao lưu phải nằm trong thư mục backup' });
+        return;
+      }
+      let name = raw;
+      if (name.startsWith('backups/')) name = name.slice('backups/'.length);
+      if (name.length === 0 || name.includes('/')) {
+        res.status(400).json({ error: 'file sao lưu phải nằm trong thư mục backup' });
+        return;
+      }
+      const backupPath = join(BACKUP_DIR, name);
+      if (!existsSync(backupPath)) {
+        res.status(404).json({ error: 'không tìm thấy file sao lưu' });
+        return;
+      }
+      const dbPath = dbFilePath();
+      if (dbPath === null) {
+        res.status(400).json({ error: 'không khôi phục được cơ sở dữ liệu trong bộ nhớ' });
+        return;
+      }
+      execFileSync('bash', [join(baseDir, 'scripts', 'restore.sh'), backupPath, dbPath], {
+        cwd: baseDir,
+        stdio: 'pipe',
+      });
+      writeAudit(db, actor.orgId, actor.id, 'restore-backup', { file: `backups/${name}` });
+      res.json({ ok: true, file: `backups/${name}`, restored_at: new Date().toISOString() });
+    } catch (err) {
+      dashFail(res, err);
+    }
   });
 
   return app;

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Thông báo và công việc</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Thông báo và công việc</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+  <p><a href="/dashboard">Về trang tổng quan</a> | <a href="/">Về trang chính</a></p>
+
+  <h2>Thông báo mới nhất</h2>
+  <% if (notifications.length === 0) { %>
+    <p>Chưa có thông báo nào.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Loại sự kiện</th><th>Trạng thái</th><th>Tiêu đề</th><th>Người nhận</th></tr>
+    </thead>
+    <tbody>
+      <% notifications.forEach(function (n) { %>
+      <tr>
+        <td><%= n.event_type %></td>
+        <td><%= n.status %></td>
+        <td><%= n.subject %></td>
+        <td><%= n.recipient_email %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+
+  <h2>Công việc thất bại cần chú ý</h2>
+  <% if (failedJobs.length === 0) { %>
+    <p>Không có công việc nào thất bại.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Mã công việc</th><th>Loại</th><th>Trạng thái</th><th>Lỗi</th><th>Thao tác</th></tr>
+    </thead>
+    <tbody>
+      <% failedJobs.forEach(function (j) { %>
+      <tr>
+        <td><%= j.id %></td>
+        <td><%= j.type %></td>
+        <td>failed</td>
+        <td><%= j.last_error %></td>
+        <td><a href="/api/jobs/<%= j.id %>/retry">Chạy lại</a></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</main>
+</body>
+</html>

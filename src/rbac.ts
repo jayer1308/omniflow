@@ -485,6 +485,30 @@ export function can(actor: Actor, action: Action, target: Target): boolean {
       if (actor.role === 'owner' || actor.role === 'manager') return true;
       return target.id !== undefined && target.id === actor.id;
     }
+    // GOAL-012: ma tran dashboard/van hanh (docs/RBAC.md, D30).
+    // view-dashboard: owner/manager/accountant toan org; sales chi dung
+    // chi nhanh minh (target.branchId NULL = xem toan org -> sales 403);
+    // warehouse khong xem dashboard doanh thu -> 403. view-ops:
+    // owner/manager; sales/warehouse/accountant 403. run-backup: CHI
+    // owner (R-6 owner-only ghi de dong tong quat cua R-10 cho backup/
+    // restore; manager cung 403 — xem D30).
+    case 'view-dashboard': {
+      if (
+        actor.role === 'owner' ||
+        actor.role === 'manager' ||
+        actor.role === 'accountant'
+      ) {
+        return true;
+      }
+      if (actor.role !== 'sales') return false;
+      return inScope(actor.branchId, targetBranch);
+    }
+    case 'view-ops': {
+      return actor.role === 'owner' || actor.role === 'manager';
+    }
+    case 'run-backup': {
+      return actor.role === 'owner';
+    }
     default:
       return false;
   }

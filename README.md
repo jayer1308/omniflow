@@ -25,8 +25,8 @@ Chi tiết: `docs/SETUP.md`.
 
 ```sh
 npm test            # Vitest
-./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát)
-./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát)
+./scripts/check.sh  # CHK-1: build + test + kiểm tra (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát, dashboard/vận hành)
+./scripts/demo.sh   # CHK-2: demo từng bước (kèm bước RBAC, sản phẩm/giá/CSV, kho/tồn, đơn hàng, thanh toán/hoàn tiền, giao hàng/trả hàng, khách hàng/CRM, khuyến mãi, báo cáo/đối soát, dashboard/vận hành)
 ```
 
 ## Giao hàng + trả hàng (GOAL-007)
@@ -233,7 +233,9 @@ tồn → 403); warehouse chỉ báo cáo tồn kho được gán (các báo cá
 (D28). Endpoint chính: `GET /api/reports/revenue`,
 `GET /api/reports/stock`, `GET /api/reports/reconciliation`,
 `GET /api/reports/promotions`, `GET /api/reports/points` (mỗi endpoint
-nhận thêm `?format=csv`; không có màn hình báo cáo — GOAL-012).
+nhận thêm `?format=csv`; màn hình tổng quan (dashboard) hiển thị doanh
+thu hôm nay/tháng này khớp đúng số báo cáo — xem mục UI tổng quan +
+vận hành (GOAL-012).
 
 ## Thông báo + công việc nền (GOAL-011, D29)
 
@@ -253,7 +255,37 @@ payment/refund. Audit CHỈ thất bại cuối + retry tay. Xem `docs/RBAC.md`
 `GET/PATCH /api/notification-preferences`, `GET /api/notifications`,
 `GET /api/notifications/:id`, `GET /api/jobs`, `GET /api/jobs/:id`,
 `POST /api/jobs/run` (trả `{processed, done, failed}`),
-`POST /api/jobs/:id/retry` (không có màn hình thông báo/job — GOAL-012).
+`POST /api/jobs/:id/retry` (màn hình thông báo/job xem mục UI tổng quan
++ vận hành (GOAL-012)).
+
+## UI tổng quan + vận hành (GOAL-012, D30)
+
+Dashboard `GET /dashboard` (EJS, tiếng Việt, mobile-first): doanh thu
+hôm nay + tháng này qua `computeRevenueReport` (chỉ đơn `completed`,
+theo Asia/Ho_Chi_Minh — khớp đúng số `GET /api/reports/revenue` cùng
+khoảng), đơn chờ xử lý theo từng trạng thái (`draft`/`confirmed`/
+`processing`, kèm mã đơn), số cặp tồn thấp (`available < min_stock`),
+số thông báo chưa đọc (notification `sent` tạo sau lần cuối user mở
+trang thông báo/job — mốc lưu trong bộ nhớ tiến trình, không thêm cột
+DB). Màn hình tổng quan: `GET /dashboard/shipments` (đơn đang giao kèm
+mã vận đơn + carrier + trạng thái, trả chờ duyệt kèm lý do, trả vừa
+nhận gần nhất, link sang chi tiết đơn), `GET /dashboard/customers`
+(khách VIP, điểm đã đổi trong tháng × 100đ, khách mới trong tháng),
+`GET /dashboard/notifications` (10 thông báo mới nhất, job `failed`
+kèm link retry tay qua API GOAL-011). Health mở rộng `GET /health` trả
+`{status, db, version, uptime_seconds}` (`version` đọc từ
+`package.json`, DB lỗi → 503). Sao lưu/khôi phục qua UI
+`GET /ops/backup` + `POST /api/ops/backup` (trả `{file, size,
+created_at}`) + `POST /api/ops/restore` (`{file, confirm: true}`) —
+chỉ bọc `scripts/backup.sh` + `scripts/restore.sh`, CHỈ owner (R-6
+owner-only ghi đè dòng tổng quát của R-10; manager cũng 403). Nhật ký
+`GET /audit-log` thêm lọc `actor=`/`action=`/`from=`/`to=` + phân
+trang `page`/`limit` (mặc định 1/20, tối đa 100; lọc sai → 400).
+RBAC: owner/manager/accountant xem dashboard toàn org; sales chỉ chi
+nhánh mình (`?branch_id=` khác → 403); warehouse không xem dashboard
+doanh thu (chỉ màn hình giao hàng thuộc kho được gán); accountant chạy
+backup/restore → 403. Xem `docs/RBAC.md` (ma trận dashboard/vận hành)
+và `docs/DECISIONS.md` (D30).
 
 ## Stack
 

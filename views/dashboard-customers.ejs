@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Khách hàng và điểm</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Khách hàng và điểm</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+  <p><a href="/dashboard">Về trang tổng quan</a> | <a href="/">Về trang chính</a></p>
+
+  <h2>Điểm đã đổi trong tháng</h2>
+  <p>Tổng điểm đã đổi: <strong><%= redeemedPoints %></strong> điểm</p>
+  <p>Giá trị điểm đã đổi: <strong><%= redeemedAmountText %>đ</strong></p>
+  <p>Khách mới trong tháng: <strong><%= newCustomers %></strong></p>
+
+  <h2>Khách VIP</h2>
+  <% if (vips.length === 0) { %>
+    <p>Chưa có khách VIP.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Tên khách</th><th>Điện thoại</th><th>Phân khúc</th><th>Điểm hiện có</th></tr>
+    </thead>
+    <tbody>
+      <% vips.forEach(function (c) { %>
+      <tr>
+        <td><a href="/api/customers/<%= c.id %>"><%= c.name %></a></td>
+        <td><%= c.phone %></td>
+        <td><%= c.segment %></td>
+        <td><%= c.points_balance %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</main>
+</body>
+</html>

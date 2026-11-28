@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Sao lưu và khôi phục</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Sao lưu và khôi phục</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>). Chỉ chủ doanh nghiệp mới dùng được trang này.</p>
+  <p><a href="/dashboard">Về trang tổng quan</a> | <a href="/">Về trang chính</a></p>
+
+  <h2>Bản sao lưu gần nhất</h2>
+  <% if (!latest) { %>
+    <p>Chưa có sao lưu nào.</p>
+  <% } else { %>
+    <p>Tên file: <strong><%= latest.name %></strong></p>
+    <p>Đường dẫn: <strong><%= latest.file %></strong></p>
+    <p>Kích thước: <strong><%= latest.size %></strong> byte</p>
+    <p>Thời gian tạo: <strong><%= latest.created_at %></strong></p>
+  <% } %>
+
+  <h2>Tạo sao lưu mới</h2>
+  <form method="post" action="/api/ops/backup">
+    <button type="submit">Tạo sao lưu</button>
+  </form>
+
+  <h2>Khôi phục từ sao lưu</h2>
+  <p>Khôi phục sẽ ghi đè dữ liệu hiện tại bằng bản sao lưu đã chọn. Cần xác nhận trước khi khôi phục.</p>
+  <form method="post" action="/api/ops/restore">
+    <label>Tên file sao lưu
+      <input type="text" name="file" value="<%= latest ? latest.file : '' %>" required>
+    </label>
+    <label>
+      <input type="checkbox" name="confirm" value="true"> Tôi xác nhận khôi phục
+    </label>
+    <button type="submit">Khôi phục</button>
+  </form>
+</main>
+</body>
+</html>
