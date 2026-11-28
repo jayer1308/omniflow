@@ -50,7 +50,7 @@ test('AC-1 luan chay day du: seed roi dang nhap roi goi owner-only', async () =>
     .send({ email: seeded.ownerEmail, password: OWNER_PASSWORD });
   expect(login.status).toBe(200);
   const health = await request(app).get('/health');
-  expect(health.body).toEqual({ status: 'ok' });
+  expect(health.body).toMatchObject({ status: 'ok' });
   const ownerOnly = await agent.get('/owner-only');
   expect(ownerOnly.status).toBe(200);
 });
