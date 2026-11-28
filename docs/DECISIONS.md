@@ -1109,3 +1109,91 @@ Quy ước: mỗi quyết định có số D, ngày, nội dung, lý do, và đi
   recipient_user_id) thay vì email (khi user đổi email giữa enqueue
   và gửi), hoặc job scan cần gắn org (thêm `org_id` vào bảng `jobs`
   qua migration mới — phải qua goal riêng và ghi rõ lý do).
+
+## D30 — UI tổng quan + vận hành (GOAL-012, 28/11/2026)
+
+- Nguồn số liệu dashboard (R-1/R-9): KHÔNG tính lại bằng SQL riêng.
+  Doanh thu hôm nay/tháng này qua `computeRevenueReport` (GOAL-010,
+  chỉ đơn `completed`, khoảng ngày theo Asia/Ho_Chi_Minh, `branchId`
+  khi sales xem chi nhánh mình — nên số dashboard khớp đúng số
+  `GET /api/reports/revenue` cùng khoảng). Đơn chờ xử lý đếm từ bảng
+  `orders` theo trạng thái `draft`/`confirmed`/`processing` (kèm mã đơn
+  để đối chiếu với `GET /api/orders?status=`). Tồn thấp qua
+  `computeStockReport` (GOAL-004): cặp (biến thể, kho) có
+  `available < min_stock`, lọc theo kho thuộc chi nhánh khi sales xem.
+  Thông báo qua bảng `notifications` (GOAL-011). Giao/trả qua bảng
+  `shipments`/`returns` (GOAL-007). Khách VIP qua `customerView` /
+  `segmentFor` (GOAL-008: VIP khi `total_spent >= 5.000.000đ` hoặc
+  `order_count >= 10`); điểm đã đổi trong tháng qua
+  `computePointsReport` (GOAL-010: `redeemed × 100đ`); khách mới trong
+  tháng đếm từ `customers.created_at` trong tháng. Job failed qua bảng
+  `jobs` (GOAL-011, kèm link retry tay `/api/jobs/:id/retry`).
+- Định nghĩa "chưa đọc" (R-1): notification có `status = 'sent'` được
+  tạo SAU lần cuối cùng user đó mở trang `/dashboard/notifications`.
+  Mốc "đã xem" lưu trong bộ nhớ tiến trình theo user id
+  (`Map<userId, ISO-timestamp>` trong `createApp`), KHÔNG thêm cột DB
+  mới (schema đã chốt ở migration 015, không có cột đọc riêng). Chưa
+  mở trang lần nào → mọi notification `sent` trong phạm vi đều tính là
+  chưa đọc. Khởi động lại tiến trình thì mốc reset (mọi `sent` lại tính
+  là chưa đọc) — chấp nhận được vì đây chỉ là chỉ báo tổng quan, không
+  phải trạng thái nghiệp vụ; nếu sau này cần trạng thái đọc bền vững thì
+  thêm bảng/cột riêng qua goal riêng.
+- Health mở rộng (R-5): `GET /health` giữ `{status: 'ok'}` khi DB ok,
+  thêm `db: 'ok'` (kiểm tra kết nối SQLite thật bằng `SELECT 1`),
+  `version` đọc từ `package.json` lúc khởi động (không hard-code),
+  `uptime_seconds` = `Math.floor(process.uptime())` (số nguyên ≥ 0).
+  DB lỗi → `status: 'error'` + `db: 'error'` + HTTP 503.
+- Sao lưu/khôi phục (R-6): CHỈ bọc `scripts/backup.sh` +
+  `scripts/restore.sh` GOAL-001 (không viết logic sao lưu mới). File
+  backup mặc định vào `<repo>/backups/omniflow-<timestamp>-<rand>.db`;
+  API trả `{file, size, created_at}` với `file` dạng tương đối
+  `backups/<tên>`. Trang `/ops/backup` hiện bản sao lưu gần nhất (tên
+  file + thời gian + kích thước, hoặc "Chưa có sao lưu"). Restore nhận
+  đúng giá trị `file` đã trả (cũng nhận tên file trần); yêu cầu
+  `confirm: true`, thiếu/sai → 400; file không tồn tại → 404; đường
+  dẫn tuyệt đối, `..`, `\` hoặc đường dẫn con khác → 400 (chỉ file
+  nằm trong thư mục backup mặc định). Đường dẫn file DB đang chạy lấy
+  qua `PRAGMA database_list` (DB `:memory:` không có file → backup/
+  restore trả 400). Audit ghi `create-backup` / `restore-backup`.
+- Audit mở rộng (R-7): `GET /audit-log` thêm lọc `actor=` (id người
+  dùng, số), `action=` (khớp đúng), `from=`/`to=` (YYYY-MM-DD theo
+  Asia/Ho_Chi_Minh, `from <= to`) + phân trang `page`/`limit` (mặc
+  định page 1, limit 20, tối đa 100). Lọc sai giá trị → 400. Giữ hành
+  vi cũ: owner/manager only (ngoài vai → 403), manager vẫn chỉ thấy
+  bản ghi trong phạm vi qua `visibleAuditRows`; nội dung log không
+  đổi; `GET /api/audit-log` giữ nguyên.
+- RBAC dashboard/vận hành (R-10) — `can()` thêm 3 actions
+  `view-dashboard` / `view-ops` / `run-backup` (xem ma trận đầy đủ ở
+  `docs/RBAC.md`): owner/manager/accountant xem dashboard toàn org;
+  sales chỉ dashboard chi nhánh mình (`?branch_id=` khác → 403, xem
+  toàn org → 403); warehouse không xem dashboard doanh thu → 403
+  (chỉ xem màn hình giao hàng thuộc kho được gán); accountant xem
+  dashboard chỉ xem (chạy backup/restore → 403); sales/warehouse xem
+  vận hành → 403; user org A xem dashboard org B → 403 (gate theo
+  `branch_id` + `org_id` của chi nhánh, theo mẫu `branch_id` của API
+  báo cáo/đơn).
+- Quyết định R-6 thắng R-10 cho backup/restore (coordinator, 28/11):
+  R-10 ma trận ghi "owner/manager … chạy backup/restore" là câu tổng
+  quát, bị R-6 ghi đè cho riêng tính năng backup: backup/restore là
+  OWNER-ONLY — `GET /ops/backup`, `POST /api/ops/backup`,
+  `POST /api/ops/restore` đều chỉ owner, manager cũng 403 (test đã
+  khóa theo hướng này). `can(manager, 'view-ops') = true` theo ma
+  trận, nhưng trang `/ops/backup` gate bằng `run-backup` (owner-only),
+  KHÔNG dùng `view-ops` cho trang này. `can(manager, 'run-backup')`
+  = false; `can(owner, 'run-backup')` = true, mọi vai còn lại false.
+- EJS (R-8): 5 màn hình mới (`dashboard`, `dashboard-shipments`,
+  `dashboard-customers`, `dashboard-notifications`, `ops-backup`) dùng
+  chung `public/style.css`, tiếng Việt, mobile-first, điều hướng bằng
+  link/button focus được (không `onclick`); trạng thái rỗng hiển thị
+  0/empty đúng nghĩa, không crash; lỗi service → trang lỗi 500 không
+  lộ stack trace.
+- Lý do: dùng lại service đã khóa thay vì SQL riêng để số dashboard
+  không bao giờ lệch API báo cáo; mốc "đã xem" trong bộ nhớ thay vì
+  cột DB vì schema đã chốt và chỉ báo tổng quan không cần bền vững;
+  backup qua script sẵn có thay vì logic mới vì cơ chế GOAL-001 đã
+  được kiểm chứng (kể cả test backup/restore).
+- Đổi khi: cần trạng thái đọc bền vững theo user (thêm cột/bảng qua
+  goal riêng), cần backup ra ngoài thư mục mặc định (thêm cấu hình
+  qua biến môi trường + goal riêng), hoặc cần trang vận hành cho
+  manager (nới `run-backup` qua goal riêng — hiện tại R-6 chốt
+  owner-only).

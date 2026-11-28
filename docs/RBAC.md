@@ -448,6 +448,52 @@ có bảng `notifications`). Xem log theo luật GOAL-002. Không thêm màn
 hình thông báo/job (GOAL-012); email chỉ qua `FakeEmailAdapter`
 (`simulated: true`), không gửi email thật.
 
+### Ma trận quyền dashboard + vận hành (GOAL-012, D30)
+
+Dashboard/vận hành là dữ liệu cấp org, lọc theo vai + phạm vi chi
+nhánh/kho. Helper `can()` mở rộng 3 actions: `view-dashboard` (xem
+dashboard + các màn hình tổng quan giao/trả, khách/điểm, thông báo/job),
+`view-ops` (xem trang vận hành), `run-backup` (chạy backup/restore).
+Mọi endpoint qua `requireAuth` + `can()`; ngoài org → 403.
+`?branch_id=` trên `/dashboard` theo mẫu `branch_id` của API báo
+cáo/đơn: chi nhánh không tồn tại → 404, ngoài org → 403, sales xin
+chi nhánh khác → 403.
+
+| Thao tác | owner | manager | sales | warehouse | accountant |
+|---|---|---|---|---|---|
+| Xem dashboard (`GET /dashboard`, `?branch_id=` tùy chọn) | Được, toàn org | Được, toàn org | Được, chỉ chi nhánh mình (không `branch_id` → mặc định chi nhánh mình; xin chi nhánh khác/toàn org → 403) | Không (403 — không xem dashboard doanh thu) | Được, toàn org (chỉ xem) |
+| Màn hình giao/trả (`GET /dashboard/shipments`) | Được, toàn org | Được, toàn org | Được, chỉ đơn thuộc chi nhánh mình | Được, chỉ đơn thuộc kho được gán | Được, toàn org (chỉ xem) |
+| Màn hình khách/điểm (`GET /dashboard/customers`) | Được, toàn org | Được, toàn org | Được, chỉ khách thuộc chi nhánh mình | Không (403) | Được, toàn org (chỉ xem) |
+| Màn hình thông báo/job (`GET /dashboard/notifications`) | Được, toàn org | Được, toàn org | Được, chỉ thông báo chi nhánh mình (job → không hiện) | Được, chỉ thông báo `stock.low` kho được gán + job `low-stock-scan` | Được, chỉ thông báo payment/refund (job → không hiện) |
+| Xem trang vận hành (`GET /ops/backup`) | Được | Không (403) | Không (403) | Không (403) | Không (403) |
+| Chạy backup/restore (`POST /api/ops/backup`, `POST /api/ops/restore`) | Được | Không (403) | Không (403) | Không (403) | Không (403) |
+
+Ghi chú: backup/restore là OWNER-ONLY theo R-6 — R-6 ghi đè dòng tổng
+quát "owner/manager … chạy backup/restore" của R-10 cho riêng tính
+năng backup (xem D30). `can(manager, 'view-ops') = true` theo ma
+trận, nhưng trang `/ops/backup` gate bằng `run-backup` (owner-only),
+KHÔNG dùng `view-ops` cho trang này. `can(manager, 'run-backup')`
+= false. Restore yêu cầu `confirm: true` (thiếu/sai → 400), file
+không tồn tại → 404, file ngoài thư mục backup → 400.
+
+### Endpoints mới (GOAL-012)
+
+| Endpoint | Vai trò |
+|---|---|
+| `GET /dashboard` | owner/manager/accountant toàn org; sales chỉ chi nhánh mình; warehouse → 403 |
+| `GET /dashboard/shipments` | owner/manager/accountant toàn org; sales chỉ chi nhánh mình; warehouse chỉ kho được gán |
+| `GET /dashboard/customers` | owner/manager/accountant toàn org; sales chỉ chi nhánh mình; warehouse → 403 |
+| `GET /dashboard/notifications` | owner/manager/accountant toàn org; sales chỉ chi nhánh mình; warehouse chỉ `stock.low` + job `low-stock-scan` |
+| `GET /health` | không cần đăng nhập; trả `{status, db, version, uptime_seconds}`; DB lỗi → 503 |
+| `GET /ops/backup` | chỉ owner |
+| `POST /api/ops/backup` | chỉ owner; trả `{file, size, created_at}` |
+| `POST /api/ops/restore` | chỉ owner; body `{file, confirm: true}`; thiếu/sai confirm → 400, file không tồn tại → 404, file ngoài thư mục backup → 400 |
+| `GET /audit-log?actor=&action=&from=&to=&page=&limit=` | owner/manager; lọc sai giá trị → 400; mặc định page 1, limit 20, tối đa 100 |
+
+Audit log: backup/restore ghi `audit_log` (`create-backup` /
+`restore-backup`, `detail` JSON với `file` (+ `size` khi tạo).
+Xem log theo luật GOAL-002 + lọc/phân trang GOAL-012.
+
 Audit log: mọi thao tác tạo/sửa/khóa mã, áp mã, hoàn lượt dùng khi hủy
 đơn đều ghi `audit_log` (`action` `create-promotion` /
 `update-promotion` / `apply-promotion` / `promotion-usage-released`,

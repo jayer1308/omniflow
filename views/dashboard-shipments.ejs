@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Giao hàng và trả hàng</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Giao hàng và trả hàng</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+  <p><a href="/dashboard">Về trang tổng quan</a> | <a href="/">Về trang chính</a></p>
+
+  <h2>Đơn đang giao</h2>
+  <% if (shipments.length === 0) { %>
+    <p>Không có đơn đang giao.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Mã đơn</th><th>Mã vận đơn</th><th>Đơn vị vận chuyển</th><th>Trạng thái</th></tr>
+    </thead>
+    <tbody>
+      <% shipments.forEach(function (s) { %>
+      <tr>
+        <td><a href="/api/orders/<%= s.order_id %>"><%= s.order_code %></a></td>
+        <td><%= s.tracking_code %></td>
+        <td><%= s.carrier %></td>
+        <td><%= s.status %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+
+  <h2>Trả hàng chờ duyệt</h2>
+  <% if (pendingReturns.length === 0) { %>
+    <p>Không có yêu cầu trả hàng chờ duyệt.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Mã đơn</th><th>Mã trả</th><th>Lý do</th><th>Trạng thái</th></tr>
+    </thead>
+    <tbody>
+      <% pendingReturns.forEach(function (r) { %>
+      <tr>
+        <td><a href="/api/orders/<%= r.order_id %>"><%= r.order_code %></a></td>
+        <td><%= r.code %></td>
+        <td><%= r.reason %></td>
+        <td><%= r.status %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+
+  <h2>Trả hàng vừa nhận</h2>
+  <% if (receivedReturns.length === 0) { %>
+    <p>Chưa có hàng trả nào được nhận.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Mã đơn</th><th>Mã trả</th><th>Lý do</th><th>Trạng thái</th></tr>
+    </thead>
+    <tbody>
+      <% receivedReturns.forEach(function (r) { %>
+      <tr>
+        <td><a href="/api/orders/<%= r.order_id %>"><%= r.order_code %></a></td>
+        <td><%= r.code %></td>
+        <td><%= r.reason %></td>
+        <td><%= r.status %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+</main>
+</body>
+</html>

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniFlow — Tổng quan</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Tổng quan</h1>
+  <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+  <p>
+    <a href="/dashboard/shipments">Giao hàng và trả hàng</a> |
+    <a href="/dashboard/customers">Khách hàng và điểm</a> |
+    <a href="/dashboard/notifications">Thông báo và công việc</a> |
+    <a href="/audit-log">Nhật ký thao tác</a> |
+    <a href="/">Về trang chính</a>
+  </p>
+
+  <h2>Doanh thu</h2>
+  <p>Doanh thu hôm nay: <strong><%= revenueTodayText %>đ</strong></p>
+  <p>Doanh thu tháng này: <strong><%= revenueMonthText %>đ</strong></p>
+
+  <h2>Đơn chờ xử lý</h2>
+  <p>Nháp: <strong><%= pendingByStatus.draft %></strong> | Đã xác nhận: <strong><%= pendingByStatus.confirmed %></strong> | Đang xử lý: <strong><%= pendingByStatus.processing %></strong></p>
+  <% if (pendingOrders.length === 0) { %>
+    <p>Không có đơn chờ xử lý.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Mã đơn</th><th>Trạng thái</th><th>Tổng tiền</th></tr>
+    </thead>
+    <tbody>
+      <% pendingOrders.forEach(function (order) { %>
+      <tr>
+        <td><a href="/api/orders/<%= order.id %>"><%= order.code %></a></td>
+        <td><%= order.status %></td>
+        <td><%= order.total.toLocaleString('vi-VN') %>đ</td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+
+  <h2>Tồn thấp</h2>
+  <p>Số cặp biến thể/kho tồn thấp: <strong><%= lowStock.length %></strong></p>
+  <% if (lowStock.length === 0) { %>
+    <p>Không có mặt hàng tồn thấp.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>Sản phẩm</th><th>Kho</th><th>Còn bán được</th><th>Tồn tối thiểu</th></tr>
+    </thead>
+    <tbody>
+      <% lowStock.forEach(function (row) { %>
+      <tr>
+        <td><%= row.sku %></td>
+        <td><%= row.product_name %></td>
+        <td><%= row.warehouse_name %></td>
+        <td><%= row.available %></td>
+        <td><%= row.min_stock %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+
+  <h2>Thông báo chưa đọc</h2>
+  <p>Số thông báo chưa đọc: <strong><%= unreadCount %></strong></p>
+  <% if (recentNotifications.length === 0) { %>
+    <p>Chưa có thông báo nào.</p>
+  <% } else { %>
+  <table>
+    <thead>
+      <tr><th>Loại sự kiện</th><th>Trạng thái</th><th>Tiêu đề</th></tr>
+    </thead>
+    <tbody>
+      <% recentNotifications.forEach(function (n) { %>
+      <tr>
+        <td><%= n.event_type %></td>
+        <td><%= n.status %></td>
+        <td><%= n.subject %></td>
+      </tr>
+      <% }); %>
+    </tbody>
+  </table>
+  <% } %>
+  <p><a href="/dashboard/notifications">Xem tất cả thông báo</a></p>
+</main>
+</body>
+</html>

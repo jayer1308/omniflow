@@ -23,7 +23,9 @@ npm run seed   # tạo dữ liệu giả lập tối thiểu (1 org, 1 branch, o
 npm start      # chạy ở http://localhost:3000
 ```
 
-Mở http://localhost:3000/health — phải trả `{"status":"ok"}`.
+Mở http://localhost:3000/health — phải trả JSON
+`{"status":"ok","db":"ok","version":"<phiên bản trong package.json>","uptime_seconds":<số nguyên >= 0>}`
+(DB lỗi → `status` thành `error` + HTTP 503).
 
 ### Tài khoản seed (giả lập)
 
@@ -362,7 +364,9 @@ CSV mới ghi `audit_log` (action `export-report`, `detail` JSON
 `{report, from, to, format: 'csv', filter đã dùng}` — KHÔNG chứa thông
 tin thẻ, KHÔNG chứa PII khách); xem JSON không ghi audit. RBAC báo cáo
 đầy đủ: `docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D28).
-KHÔNG lưu thông tin thẻ; không thêm màn hình báo cáo (GOAL-012).
+KHÔNG lưu thông tin thẻ; màn hình tổng quan (dashboard) hiển thị doanh
+thu hôm nay/tháng này khớp đúng số báo cáo — xem mục UI tổng quan +
+vận hành (GOAL-012) bên dưới.
 
 ## Thông báo + công việc nền (GOAL-011)
 
@@ -396,8 +400,27 @@ scripts/notif-ops.ts low-stock-scan|promo-expiry-scan|fail-job`
 (`POST /api/jobs/run` chỉ chạy job due, không enqueue scan). Audit
 CHỈ thất bại cuối (`notification-failed`/`job-failed`, detail KHÔNG
 chứa nội dung email hay email khách) + retry tay. RBAC đầy đủ:
-`docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D29). Không
-thêm màn hình thông báo/job (GOAL-012).
+`docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D29). Màn
+hình thông báo/job xem mục UI tổng quan + vận hành (GOAL-012) bên dưới.
+
+## UI tổng quan + vận hành (GOAL-012)
+
+Dashboard `GET /dashboard` (EJS): doanh thu hôm nay/tháng này
+(`computeRevenueReport`, chỉ đơn `completed`, theo Asia/Ho_Chi_Minh),
+đơn chờ xử lý theo từng trạng thái, tồn thấp, thông báo chưa đọc
+(định nghĩa D30). Màn hình tổng quan: `GET /dashboard/shipments`,
+`GET /dashboard/customers`, `GET /dashboard/notifications`. Health mở
+rộng: `GET /health` trả `{status, db, version, uptime_seconds}`.
+Sao lưu/khôi phục qua API (chỉ owner): `POST /api/ops/backup` (trả
+`{file, size, created_at}`, file vào `<repo>/backups/`),
+`POST /api/ops/restore` với body `{file, confirm: true}` (thiếu/sai
+confirm → 400, file không tồn tại → 404, file ngoài thư mục backup
+→ 400); trang `GET /ops/backup` hiện bản sao lưu gần nhất. Nhật ký:
+`GET /audit-log?actor=&action=&from=&to=&page=&limit=` (mặc định
+page 1, limit 20, tối đa 100; lọc sai → 400). RBAC đầy đủ:
+`docs/RBAC.md`; quyết định mô hình: `docs/DECISIONS.md` (D30). Lưu ý:
+khôi phục qua API ghi đè file DB đang chạy — sau restore nên khởi
+động lại server để chắc chắn mọi kết nối đọc đúng dữ liệu mới.
 
 ## Kho đa kho + tồn (GOAL-004)
 
@@ -439,7 +462,12 @@ DB là một file SQLite duy nhất (`data/omniflow.db` mặc định).
 
 Khôi phục đưa dữ liệu về đúng trạng thái lúc backup (đã có test chứng minh
 trong `tests/integration.test.ts` và bước demo trong `scripts/demo.sh`).
-Dừng server trước khi restore file DB đang chạy.
+Dừng server trước khi restore file DB đang chạy. Ngoài script, còn có
+API + trang UI (chỉ owner): `POST /api/ops/backup` tạo file backup vào
+`<repo>/backups/` (trả `{file, size, created_at}`),
+`POST /api/ops/restore` với body `{file, confirm: true}` khôi phục từ
+file đó, trang `GET /ops/backup` hiện bản sao lưu gần nhất (xem mục UI
+tổng quan + vận hành (GOAL-012) và `docs/DECISIONS.md` D30).
 
 ## Cấu trúc
 

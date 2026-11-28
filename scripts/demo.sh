@@ -52,9 +52,13 @@ for _ in $(seq 1 50); do
 done
 
 check_health() {
-  [ "$(curl -fsS "http://127.0.0.1:$PORT_DEMO/health")" = '{"status":"ok"}' ]
+  local h
+  h="$(curl -fsS "http://127.0.0.1:$PORT_DEMO/health")"
+  echo "$h" | grep -q '"status":"ok"' && echo "$h" | grep -q '"db":"ok"' \
+    && echo "$h" | grep -q '"version":"0.1.0"' \
+    && echo "$h" | grep -q '"uptime_seconds":[0-9]*'
 }
-demo_step "GET /health tra {status: ok}" check_health
+demo_step "GET /health tra {status: ok, db: ok, version, uptime_seconds}" check_health
 
 COOKIE="$TMPDIR_DEMO/cookie.txt"
 login_owner() {
@@ -1388,6 +1392,158 @@ notif_scan_va_retry_rbac() {
 }
 demo_step "thong bao: cap ton thap -> low-stock-scan -> stock.low dung kho, ma het han 2 ngay -> promo-expiry-scan -> promotion.expiring, job fail -> retry -> sent, RBAC 403" notif_scan_va_retry_rbac
 
+# Dashboard + van hanh (GOAL-012): don 250000d counter -> xac nhan -> hoan
+# tat -> thu 100000d -> chay job due -> dashboard doanh thu khop API bao
+# cao cung khoang + don + ton thap + thong bao chua doc; man hinh giao/tra
+# co don dang giao + tra cho duyet; man hinh khach co VIP; man hinh thong
+# bao co job failed + link retry; backup qua API -> doi du lieu -> restore
+# qua API -> du lieu ve dung; audit loc + phan trang; RBAC 403 (sales xem
+# dashboard chi nhanh khac, warehouse xem doanh thu, accountant chay backup).
+dashboard_va_van_hanh() {
+  local wha v1 v2 today rev gross vnd dash ord ord_id code run
+  local ship_ord ship_oid ship_trk ship_id ret_ord ret_oid page
+  local vip_prod vip_var vip vip_oid phone cust_page
+  local fail_out fail_id notif_page backup file after after_id restore audit
+  local acct_pass acct_cookie code
+  wha="$(cat "$WHA_FILE")"
+  v1="$(cat "$G1V_FILE")"
+  v2="$(cat "$G2V_FILE")"
+  ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":2},{\"variant_id\":$v2,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  echo "$ord" | grep -q '"total":250000' || { echo "total don dashboard sai: $ord"; return 1; }
+  ord_id="$(echo "$ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  code="$(echo "$ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).code))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/complete" | grep -q '"status":"completed"' || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"method":"cash","amount":100000}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ord_id/payments" | grep -q '"status":"paid"' || return 1
+  run="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/jobs/run")"
+  echo "$run" | grep -q '"done"' || { echo "chay job due sai: $run"; return 1; }
+  today="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+  rev="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/reports/revenue?from=$today&to=$today&group_by=day")"
+  gross="$(echo "$rev" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).totals.gross_revenue))")"
+  vnd="$(node -e "console.log(Number(process.argv[1]).toLocaleString('vi-VN'))" "$gross")"
+  dash="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard")"
+  echo "$dash" | grep -q "$vnd" || { echo "dashboard doanh thu $vnd khong khop API ($gross)"; return 1; }
+  echo "$dash" | grep -q "$code" || { echo "dashboard thieu ma don $code"; return 1; }
+  echo "$dash" | grep -q 'SKU-SEED-01-M' || { echo "dashboard thieu ton thap seed"; return 1; }
+  echo "$dash" | grep -q 'order.completed' || { echo "dashboard thieu thong bao chua doc"; return 1; }
+  # Giao/tra: don hoan tat -> giao -> in_transit; don hoan tat khac -> tra cho duyet.
+  ship_ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  ship_oid="$(echo "$ship_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ship_oid/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ship_oid/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ship_oid/complete" >/dev/null || return 1
+  ship_trk="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"carrier":"GHN-fake","destination":"TP.HCM"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ship_oid/shipments" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.shipment||b).tracking_code)})")"
+  ship_id="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/orders/$ship_oid/shipments" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);const l=b.shipments||b;console.log(l[0].id)})")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{"status":"in_transit"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/shipments/$ship_id/status" | grep -q '"status":"in_transit"' || return 1
+  ret_ord="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"items\":[{\"variant_id\":$v1,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders")"
+  ret_oid="$(echo "$ret_ord" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ret_oid/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ret_oid/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ret_oid/complete" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"items\":[{\"variant_id\":$v1,\"qty\":1,\"condition\":\"resalable\"}],\"reason\":\"tra demo doi y\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$ret_oid/returns" >/dev/null || return 1
+  page="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard/shipments")"
+  echo "$page" | grep -q "$ship_trk" || { echo "man hinh giao/tra thieu ma van don"; return 1; }
+  echo "$page" | grep -q 'GHN-fake' || { echo "man hinh giao/tra thieu carrier"; return 1; }
+  echo "$page" | grep -q 'in_transit' || { echo "man hinh giao/tra thieu in_transit"; return 1; }
+  echo "$page" | grep -q 'tra demo doi y' || { echo "man hinh giao/tra thieu ly do tra"; return 1; }
+  # Khach VIP (don 5.000.000d hoan tat).
+  vip_prod="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-VIP-DEMO","name":"SP VIP 5tr","price":5000000,"unit":"cai","min_stock":0}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  vip_var="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"sku":"SKU-VIP-DEMO","name":"Bien the VIP"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products/$vip_prod/variants" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.variant||b).id)})")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"variant_id\":$vip_var,\"qty\":5,\"reason\":\"nhap VIP\"}" \
+    "http://127.0.0.1:$PORT_DEMO/api/stock/in" >/dev/null || return 1
+  phone="090$(date +%s | rev | cut -c1-7 | rev)"
+  vip="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"Khach VIP demo\",\"phone\":\"$phone\",\"branch_id\":1}" \
+    "http://127.0.0.1:$PORT_DEMO/api/customers" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s);console.log((b.customer||b).id)})")"
+  vip_oid="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"warehouse_id\":$wha,\"channel\":\"counter\",\"customer_id\":$vip,\"items\":[{\"variant_id\":$vip_var,\"qty\":1}]}" \
+    "http://127.0.0.1:$PORT_DEMO/api/orders" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$vip_oid/confirm" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$vip_oid/process" >/dev/null || return 1
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$PORT_DEMO/api/orders/$vip_oid/complete" >/dev/null || return 1
+  cust_page="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard/customers")"
+  echo "$cust_page" | grep -q 'Khach VIP demo' || { echo "man hinh khach thieu VIP"; return 1; }
+  # Thong bao: job failed gia lap -> link retry. Chen truc tiep 1 job
+  # failed (khong dung fail-job lan 2 — event_key DH-SMOKE-FAIL-0001 da
+  # co notification sent tu buoc GOAL-011 nen job moi cung event_key se
+  # ve done do dedupe, khong fail).
+  fail_id="$(sqlite3 "$OMNIFLOW_DB" "INSERT INTO jobs (type, payload, status, attempts, max_attempts, next_run_at, last_error, created_at, updated_at) VALUES ('send-notification', '{\"event_key\":\"order.completed:DH-DB-FAIL-0001\",\"event_type\":\"order.completed\",\"to_user_id\":null,\"to_email\":\"owner@example.local\",\"subject\":\"Don gia lap da hoan tat\",\"body\":\"Don gia lap da hoan tat.\"}', 'failed', 3, 3, datetime('now'), 'gui that bai gia lap', datetime('now'), datetime('now')); SELECT last_insert_rowid();")" || return 1
+  [ -n "$fail_id" ] || { echo "chen job failed gia lap that bai"; return 1; }
+  notif_page="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard/notifications")"
+  echo "$notif_page" | grep -q "/api/jobs/$fail_id/retry" || { echo "man hinh thong bao thieu link retry job $fail_id"; return 1; }
+  echo "$notif_page" | grep -q 'failed' || { echo "man hinh thong bao thieu job failed"; return 1; }
+  # Backup qua API -> doi du lieu -> restore qua API -> du lieu ve dung.
+  backup="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT_DEMO/api/ops/backup")"
+  file="$(echo "$backup" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).file))")"
+  echo "$backup" | grep -q '"size"' || { echo "backup tra ve thieu size: $backup"; return 1; }
+  after="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d '{"code":"SP-DB-DEMO","name":"SP sau backup demo","price":100000,"unit":"cai"}' \
+    "http://127.0.0.1:$PORT_DEMO/api/products" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).id))")"
+  after_id="$after"
+  restore="$(curl -fsS -X POST -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"file\":\"$file\",\"confirm\":true}" "http://127.0.0.1:$PORT_DEMO/api/ops/restore")"
+  echo "$restore" | grep -q '"ok":true' || { echo "restore tra ve: $restore"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/api/products/$after_id")"
+  [ "$code" = "404" ] || { echo "sau restore san pham moi van con (HTTP $code)"; return 1; }
+  curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/ops/backup" | grep -q "$(basename "$file")" || { echo "trang ops thieu ten file backup"; return 1; }
+  rm -f "$file"
+  # Audit loc theo action + phan trang; loc sai -> 400.
+  audit="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/audit-log?action=create-branch")"
+  echo "$audit" | grep -q 'create-branch' || { echo "audit loc action sai"; return 1; }
+  audit="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/audit-log?limit=1&page=1")"
+  echo "$audit" | grep -q 'Tổng: ' || { echo "audit phan trang thieu tong"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:$PORT_DEMO/audit-log?page=0")"
+  [ "$code" = "400" ] || { echo "audit page=0 tra ve HTTP $code, mong 400"; return 1; }
+  # RBAC 403: sales (chi nhanh 2) xem dashboard chi nhanh 1, warehouse
+  # xem dashboard doanh thu, accountant chay backup.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$SALES2_COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard?branch_id=1")"
+  [ "$code" = "403" ] || { echo "sales xem dashboard chi nhanh khac tra ve HTTP $code, mong 403"; return 1; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WH_COOKIE" "http://127.0.0.1:$PORT_DEMO/dashboard")"
+  [ "$code" = "403" ] || { echo "warehouse xem dashboard tra ve HTTP $code, mong 403"; return 1; }
+  acct_pass="$(node -e "console.log(require('crypto').randomBytes(12).toString('base64url'))")"
+  curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"ketoan-demo@example.local\",\"password\":\"$acct_pass\",\"role\":\"accountant\",\"branch_id\":1}" \
+    "http://127.0.0.1:$PORT_DEMO/api/users/invite" >/dev/null || return 1
+  acct_cookie="$TMPDIR_DEMO/acct-cookie.txt"
+  curl -fsS -c "$acct_cookie" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"ketoan-demo@example.local\",\"password\":\"$acct_pass\"}" \
+    "http://127.0.0.1:$PORT_DEMO/login" >/dev/null || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$acct_cookie" -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT_DEMO/api/ops/backup")"
+  [ "$code" = "403" ] || { echo "accountant chay backup tra ve HTTP $code, mong 403"; return 1; }
+}
+demo_step "dashboard: doanh thu khop API bao cao, don/ton/thong bao, giao/tra, khach VIP, thong bao/job failed, backup/restore qua API, audit loc + phan trang, RBAC 403" dashboard_va_van_hanh
+
 idempotency_demo() {
   local first second
   first="$(curl -fsS -b "$COOKIE" -H 'Idempotency-Key: demo-key-1' -H 'Content-Type: application/json' \
@@ -1416,9 +1572,10 @@ docs_present() {
     && grep -q 'D1' docs/DECISIONS.md && grep -q 'D10' docs/DECISIONS.md \
     && grep -q 'D24' docs/DECISIONS.md && grep -q 'D25' docs/DECISIONS.md \
     && grep -q 'D26' docs/DECISIONS.md && grep -q 'D27' docs/DECISIONS.md \
-    && grep -q 'D28' docs/DECISIONS.md \
+    && grep -q 'D28' docs/DECISIONS.md && grep -q 'D30' docs/DECISIONS.md \
     && grep -q 'create-customer' docs/RBAC.md && grep -q 'create-promotion' docs/RBAC.md \
-    && grep -q 'view-reports' docs/RBAC.md
+    && grep -q 'view-reports' docs/RBAC.md && grep -q 'view-dashboard' docs/RBAC.md \
+    && grep -q 'run-backup' docs/RBAC.md && grep -q 'GOAL-012' docs/ROADMAP.md
 }
 demo_step "docs ROADMAP/DECISIONS/SETUP co mat" docs_present
 

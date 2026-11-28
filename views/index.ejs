@@ -12,6 +12,7 @@
   <p>Hệ thống vận hành thương mại đa kênh — dữ liệu giả lập, chạy local.</p>
   <% if (user) { %>
     <p>Xin chào, <strong><%= user.email %></strong> (vai: <%= user.role %>).</p>
+    <p><a href="/dashboard">Xem trang tổng quan</a></p>
     <p><a href="/owner-only">Trang chỉ dành cho chủ doanh nghiệp</a></p>
     <form id="logout-form"><button type="submit">Đăng xuất</button></form>
   <% } else { %>
