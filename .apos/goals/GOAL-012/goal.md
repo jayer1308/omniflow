@@ -1,6 +1,6 @@
 # GOAL-012 v1: OmniFlow co UI tong quan + van hanh: dashboard (doanh thu hom nay/thang nay, don cho xu ly, ton thap, thong bao chua doc — so lieu tu service da co, khop API bao cao GOAL-010), man hinh giao/tra tong quan, man hinh khach/diem tong quan, man hinh thong bao/job tong quan; health check mo rong (DB, version, uptime); trang sao luu/khoi phuc qua dung co che GOAL-001; trang nhat ky audit co loc/phan trang; EJS tieng Viet mobile-first dong nhat, dung duoc bang ban phim; RBAC theo ma tran dashboard/van hanh + audit log day du; du lieu GIA LAP hoan toan, local-only; check.sh/demo.sh xanh ke ca buoc dashboard/van hanh moi (CHK-2 timeoutMs 20 phut tu v1); 4 yeu cau mo coi thong bao + R-20 cua GOAL-008 duoc loai tru co ly do (out-of-scope); inbox sach hoan toan sau khi dong — goal cuoi cua roadmap
 
-Status: testing
+Status: verified
 
 ```json
 {
